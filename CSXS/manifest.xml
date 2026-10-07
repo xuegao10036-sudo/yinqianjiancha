@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!-- ExtensionBundleVersion / Extension Version = CEP 包版本(安装/升级识别用), 与面板版本
+     (v10.x, 见 index.html 的 .ver 与 main.js 的 JS_BUILD)无关, 因此不随面板升号, 保持 1.0.0。 -->
 <ExtensionManifest Version="8.0"
     ExtensionBundleId="com.workbuddy.ai.preflight"
     ExtensionBundleVersion="1.0.0"

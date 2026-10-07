@@ -41,8 +41,8 @@
 // v5.21 新增: 隐藏文字统计——doc.textFrames 全集(含隐藏,封顶 500 帧)逐帧用
 //        pfBlockInfo 判可见性,隐藏帧单独计数(hiddenText),字体名并入涉及
 //        字体与缺失检测;可见文字口径不变。
-// v6.8: 极小字号分两级——<6pt 计 1 处(黄色提示),其中 <5pt 再计 badCount
-//        (红色提示)。badCount 嵌套在 count 之内;样本仍只按 <6pt 收,不重复列。
+// v10.2: 极小字号只剩一档 —— <TINY_PT 即计入并**标红**(原先 <6pt 黄 / <5pt 红两级已合并)。
+//        样本仍只按 <TINY_PT 收。
 // v8.3 新增: 叠印(Overprint)检查 —— 卡6 加"叠印"分块(计数标红) + 右上角红徽标"有叠印"。
 //        ① 图形(PathItem/CompoundPathItem): 读 pageItem 级 fillOverprint / strokeOverprint;
 //        ② 文字(TextFrame): **真机实测(AI 28.0.0) pageItem 级这两个属性"不存在"**
@@ -103,16 +103,75 @@ function pfStringify(value) {
 // 版本一致 → 跳过 $.evalFile 直接调用函数(省掉每次重载 28KB 脚本);
 // 不一致/不存在 → 强制重载一次。这样开发期改完 JSX 无需重启 AI。
 // v7.2: 仅随版本号递增(本版为面板文案一致化,检测逻辑与返回结构零改动)。
-var PF_BUILD = "9.9";
+// v10.1: 版本号 —— 面板/宿主同步递增
+var PF_BUILD = "10.9";
+
+// ============================================================
+// v10.1: 阈值唯一真源 —— 全部阈值集中在这张表, 前端不再保存任何阈值数字
+//   (面板只显示这里回传的生效值)。设置弹层的改动经 runPreflight 第 8 参传入,
+//   由 pfThApply 覆盖下面的工作副本; 未传 / 坏值逐项回落本表。
+// ============================================================
+var PF_TH_DEF = {
+  bleed: 3,      // 实际出血不足此值(mm)判露白风险      <- 原 BLEED_MIN_MM
+  tiny: 6,       // 字号低于此值(pt)判极小字号(红)       <- 原 TINY_PT
+  // v10.2: 原 tinyBad(其中重度 <5pt)已按雪糕要求去掉 —— 字号只留这一条判定
+  thin: 0.1,     // 描边宽低于此值(mm)判过细             <- 原 THIN_STROKE_MM
+  light: 5,      // CMYK 某分量 0<值<此值 判色值极浅      <- 原 LIGHT_CH
+  inkOk: 220,    // 油墨总量达此值算偏重(黄)             <- 原 INK_OK
+  inkWarn: 300,  // 油墨总量超过此值算超标(红)           <- 原 INK_WARN
+  reso: 300,     // 图片有效分辨率低于此值(ppi)判偏低    <- 原 RESO_MIN
+  cap: 5,        // 油墨/描边采样条数上限(按不同值计)    <- 原 SAMPLE_CAP
+  scan: 3000     // 每类对象最多扫描数量(防大卡死)       <- 原 MAX_SCAN
+};
 
 var PT2MM = 0.3527777778;     // 1 pt = 0.3528 mm
-var MAX_SCAN = 3000;          // 每类对象最多扫描数量(防大卡死)
-var BLEED_MIN_MM = 3;         // 实际出血不足此值(mm)时提示露白风险
-var TINY_PT = 6;              // v5.15: 字号低于此值(pt)判为极小字号(印刷易糊,黄色)
-var TINY_BAD_PT = 5;          // v6.8: 字号低于此值(pt)判为极小字号·重度(红色)
-var THIN_STROKE_MM = 0.1;     // v6.1: 描边宽 <0.1mm 判为过细(印刷易断线/丢失)
-var LIGHT_CH = 5;             // v6.1: CMYK 某分量 0<值<5 判为色值极浅(色版不稳定)
-var SAMPLE_CAP = 5;           // v7.8: 油墨类采样条数上限(**按不同值计**,同值只占 1 条并累加 n)
+// 工作副本 —— 每次 runPreflight 开头由 pfThApply 按传入值覆盖, 判定一律读这几个
+var MAX_SCAN = PF_TH_DEF.scan;
+var BLEED_MIN_MM = PF_TH_DEF.bleed;
+var TINY_PT = PF_TH_DEF.tiny;
+var THIN_STROKE_MM = PF_TH_DEF.thin;
+var LIGHT_CH = PF_TH_DEF.light;
+var SAMPLE_CAP = PF_TH_DEF.cap;
+var INK_OK = PF_TH_DEF.inkOk;
+var INK_WARN = PF_TH_DEF.inkWarn;
+var RESO_MIN = PF_TH_DEF.reso;
+
+// 阈值表浅拷贝(全是数字, 逐个列出而不是 for-in —— 免得把原型链上的东西带出去)
+function pfThCopy(t) {
+  return { bleed: t.bleed, tiny: t.tiny, thin: t.thin, light: t.light,
+           inkOk: t.inkOk, inkWarn: t.inkWarn, reso: t.reso, cap: t.cap, scan: t.scan };
+}
+// 面板首次打开设置时向 jsx 要默认值 —— 只回默认值, 不碰文档、不扫描
+function pfThDefaults() {
+  var res = { ok: true, th: pfThCopy(PF_TH_DEF) };
+  return pfReturn(res);
+}
+// v10.2: 面板传 "bleed|reso|thin|tiny|inkOk|inkWarn"(竖线分隔; v10.1 是 7 项、多一个 tinyBad)。
+//   不用 JSON —— ExtendScript 没有 JSON 对象, 竖线分隔最省事也没有转义风险。
+//   逐项校验: 非数字 / <=0 的项**回落默认值**(不是整串丢弃); 再强制一条不变量(inkOk < inkWarn)。
+//   ⚠ **字段数对不上就整串不认**(新旧版本错配 / 面板从没存过设置) —— 宁可"设置没生效",
+//     也不要按错位的线序去读: 那会把 inkOk 当 tiny 用, 拿错数字判定而且毫无提示。
+//   v10.9: 不认 ≠ 不动 —— 工作副本(BLEED_MIN_MM 等)仍要**无条件回默认**。jsx 上下文常驻,
+//     若字段数不符就提前 return, 模块级阈值会留着**上一次扫描**的值 ⇒ 判定用旧阈值、res.th
+//     却回默认 ⇒ 显示与判定不同源(雪糕 2026-10-07 真机踩中: 阈值改回默认后报出旧阈值结果)。
+function pfThApply(s) {
+  var t = pfThCopy(PF_TH_DEF);
+  var keys = ["bleed", "reso", "thin", "tiny", "inkOk", "inkWarn"];
+  var parts = String(s === undefined || s === null ? "" : s).split("|");
+  var i, v;
+  // v10.9: 字段校验收进 if —— 工作副本赋值无条件执行, 字段数不符时 t 即全默认。
+  if (parts.length === keys.length) {
+    for (i = 0; i < keys.length; i++) {
+      v = parseFloat(parts[i]);
+      if (!isNaN(v) && isFinite(v) && v > 0) t[keys[i]] = v;
+    }
+    if (t.inkWarn <= t.inkOk) t.inkWarn = Math.max(t.inkOk + 1, PF_TH_DEF.inkWarn);
+  }
+  BLEED_MIN_MM = t.bleed; RESO_MIN = t.reso; THIN_STROKE_MM = t.thin;
+  TINY_PT = t.tiny;
+  INK_OK = t.inkOk; INK_WARN = t.inkWarn; LIGHT_CH = t.light;
+  return t;
+}
 
 function pfRound(v) { return Math.round(v * 10) / 10; }
 
@@ -485,9 +544,26 @@ function pfDocKey() {
 // ============================================================
 // 主检查入口(单遍扫描)
 // ============================================================
-function runPreflight() {
+// v10.0 新增: 七卡开关 —— c1~c7 依次对应 ①画板出血 ②隐藏 ③字体 ④嵌入 ⑤分辨率
+//   ⑥油墨描边 ⑦叠印(v9.4 起叠印已从⑥拆出独立成卡)。缺省(undefined)= 开,
+//   兼容旧调用 runPreflight(); 0 / false / "0" = 关。
+//   关掉的卡在遍历里**完全不读其依赖属性**(不是"读完再丢弃"): 卡①走路 bleedOf 入口,
+//   卡⑤走 resoCheck 入口,卡⑥⑦在对象分派分支里门控,卡③④同理。判定阈值/样本口径/卡片文案一律不变。
+function pfCkOn(v) { return !(v === 0 || v === false || v === "0"); }
+
+function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
   var res = { ok: false };
   try {
+    // v10.0: 各卡门控开关(缺省全开 —— 旧调用点不传参时行为与 v9.9 逐字一致)
+    var CK = {
+      ab: pfCkOn(c1), hd: pfCkOn(c2), ft: pfCkOn(c3), im: pfCkOn(c4),
+      rs: pfCkOn(c5), ik: pfCkOn(c6), ov: pfCkOn(c7)
+    };
+    // v10.1: 先应用面板传来的阈值, 并立刻回传生效值 —— 前端只显示这个数,
+    //   自己不留任何阈值数字。缺省(旧调用点 runPreflight())时 c8 为 undefined,
+    //   pfThApply 会逐项回落 PF_TH_DEF ⇒ 与 v10.0 行为逐字一致。
+    var TH = pfThApply(c8);
+    res.th = TH;
     pfEnsureFonts(); // v8.5: 每次检查前同步(数量变化才重探/重建),中途激活/安装的字体不再漏识别
     if (app.documents.length === 0) {
       res.error = "当前没有打开的文档，请先打开一个 AI 文件。";
@@ -545,6 +621,7 @@ function runPreflight() {
     // 不会到达这里,对象自身 hidden 已在 visitItem 排除,无需再沿 parent 链
     // 向上检查;bounds 先行做重叠预测试(纯算术),任一重叠才读 guides。
     function bleedOf(it, checkGuides) {
+      if (!CK.ab) return; // v10.0: 卡①关 ⇒ 整段出血实测跳过(不再逐对象读 geometricBounds)
       var gb = null;
       try { gb = it.geometricBounds; } catch (ebg) { return; }
       if (!gb || gb.length < 4) return;
@@ -577,13 +654,17 @@ function runPreflight() {
       } catch (ehl) {}
       try {
         var subL = layer.layers;
-        for (var si = 0; si < subL.length; si++) checkLayerVisible(subL[si]);
+        var slLim = subL.length; // v10.0: 长度外提
+        for (var si = 0; si < slLim; si++) checkLayerVisible(subL[si]);
       } catch (ehl2) {}
     }
-    try {
-      var allLayers = doc.layers;
-      for (var liH = 0; liH < allLayers.length; liH++) checkLayerVisible(allLayers[liH]);
-    } catch (ehl3) {}
+    if (CK.hd) { // v10.0: 卡②关 ⇒ 整段文档级图层可见性补扫跳过(遍历里的 hidden 判定保留)
+      try {
+        var allLayers = doc.layers;
+        var aLim = allLayers.length; // v10.0: 长度外提
+        for (var liH = 0; liH < aLim; liH++) checkLayerVisible(allLayers[liH]);
+      } catch (ehl3) {}
+    }
 
     // 隐藏"对象"统计: v3.7 起随树遍历顺带统计(每类独立配额 underQuota),
     // 不再用文档级扁平集合;隐藏图层/隐藏组的子树整棵跳过,不再逐个读取。
@@ -608,12 +689,12 @@ function runPreflight() {
     // ---------- 字体 + 油墨 数据结构 ----------
     var fonts = { totalText: 0, outlined: false, names: [], truncated: false, missingFonts: [], mixedFonts: 0 };
     // v5.15: 极小字号(<6pt)统计,样本带文字内容
-    // v6.8: badCount = 其中 <5pt 的重度计数,嵌套在 count 之内
-    var tiny = { count: 0, badCount: 0, samples: [] };
+    // v10.2: 只剩一档 —— <TINY_PT 即计入(标红)
+    var tiny = { count: 0, samples: [] };
     var seen = {};
 
-    // 油墨总量规则: total < 220 无问题; 220 ~ 300 偏重(黄); > 300 超标(红)
-    var INK_OK = 220, INK_WARN = 300;
+    // 油墨总量规则(v10.1, 阈值可调): total < INK_OK 无问题; INK_OK ~ INK_WARN 偏重(黄); > INK_WARN 超标(红)
+    //   INK_OK / INK_WARN 已上提到模块级(阈值唯一真源), 由 pfThApply 按面板传入值覆盖
     // v6.2: 样本一律结构化,由前端拼装(便于按"问题类型"分组、加 [文字]/[图形] 标签、合并重复描边)
     //   badSamples/warnSamples: [{name, where, desc, total}]
     //   thinSamples: [{mm, name}]   light.samples: [{src, where, desc, name}]
@@ -683,6 +764,7 @@ function runPreflight() {
     }
 
     function scanPathInk(pi) {
+      if (!CK.ik && !CK.ov) return; // v10.0: 卡⑥⑦都关 ⇒ 整个路径油墨扫描跳过(一个属性都不读)
       var bp = black.path;
       var nm = pfObjName(pi);
       // v8.5: stroked / fillColor / strokeColor 各读一次后复用 —— 原实现 stroked 读 3 次
@@ -693,24 +775,30 @@ function runPreflight() {
       try { fc = pi.fillColor; } catch (e1) {}
       if (stk) { try { sc = pi.strokeColor; } catch (e2) {} }
       var rfc = null, rsc = null;
-      try { rfc = pfInkLightBoth(fc); } catch (e3) { rfc = null; }
-      try { if (stk) rsc = pfInkLightBoth(sc); } catch (e4) { rsc = null; }
-      if (rfc) inkBucket(bp, rfc, nm, "填充");
-      if (rsc) inkBucket(bp, rsc, nm, "描边");
+      if (CK.ik) { // v10.0: 卡⑥关 ⇒ 不读油墨/极浅
+        try { rfc = pfInkLightBoth(fc); } catch (e3) { rfc = null; }
+        try { if (stk) rsc = pfInkLightBoth(sc); } catch (e4) { rsc = null; }
+        if (rfc) inkBucket(bp, rfc, nm, "填充");
+        if (rsc) inkBucket(bp, rsc, nm, "描边");
+      }
       // v8.3: 叠印检查(图形侧,pageItem 级)——真机 28.0.0 上 PathItem 的这两个属性名尚未验证,
       //   读不到 / 抛异常由 pfOvp* 兜成 false(宁可不报,绝不误报);色值只在命中时才读,摊薄成本。
       // v8.6: 复用上面已读出的 fc / sc, 不再回读 pi.fillColor / pi.strokeColor
-      try { if (pfOvpFill(pi))   pfOvpAdd("path", "填充", fc, nm, pi); } catch (e8) {}
-      try {
-        if (pfOvpStroke(pi)) {
-          var scO = sc;   // 未描边时 sc 为 null, 此时才补读一次
-          if (!scO) { try { scO = pi.strokeColor; } catch (eScO) {} }
-          pfOvpAdd("path", "描边", scO, nm, pi);
-        }
-      } catch (e9) {}
+      if (CK.ov) { // v10.0: 卡⑦关 ⇒ 不读叠印布尔
+        try { if (pfOvpFill(pi))   pfOvpAdd("path", "填充", fc, nm, pi); } catch (e8) {}
+        try {
+          if (pfOvpStroke(pi)) {
+            var scO = sc;   // 未描边时 sc 为 null, 此时才补读一次
+            if (!scO) { try { scO = pi.strokeColor; } catch (eScO) {} }
+            pfOvpAdd("path", "描边", scO, nm, pi);
+          }
+        } catch (e9) {}
+      }
       // v6.2: 描边过细——已描边且实测宽 <0.1mm(0.005mm 容差,防恰好 0.1mm 误报)
       // v7.8: 同一"实测宽(2 位小数)"只占 1 条,n 累加全量次数(前端仍按 mm 合并显示 ×n)
-      try {
+      // v10.8: 收进 CK.ik 门 —— bp.thin 是卡⑥的内容, 原先只靠入口 return 挡住"⑥⑦全关",
+      //        关⑥留⑦时仍会走到这里白读一遍 strokeWidth 并累加(只浪费、不误报, 但不该发生)
+      if (CK.ik) { try {
         if (stk) {
           var swMm = pi.strokeWidth * PT2MM;
           if (swMm >= 0 && swMm < THIN_STROKE_MM - 0.005) {
@@ -719,7 +807,7 @@ function runPreflight() {
             pfSampleAdd(bp.thinSamples, { mm: swR, name: nm }, String(swR), SAMPLE_CAP);
           }
         }
-      } catch (e6) {}
+      } catch (e6) {} }
       // v6.2: 色值极浅——填充/描边任一为 CMYK 且某分量四舍五入后 0<值<5
       // v8.5: 复用上面一次读出的 light,不再回读色值
       try {
@@ -753,7 +841,7 @@ function runPreflight() {
     var symbols = { count: 0, scanned: 0, truncated: false };
 
     // 有效 PPI = 72 / 矩阵基向量模长(与旋转/斜切角度无关)
-    var RESO_MIN = 300;
+    // v10.1: RESO_MIN 上提到模块级(阈值唯一真源), 这里不再重复声明
     var reso = { total: 0, lowCount: 0, okCount: 0, samples: [], truncated: false };
 
     function ppiOf(item) {
@@ -772,6 +860,7 @@ function runPreflight() {
     }
 
     function resoCheck(item, label) {
+      if (!CK.rs) return; // v10.0: 卡⑤关 ⇒ 不读图片矩阵、不做 ppi 判定
       var ppi = ppiOf(item);
       if (ppi < 0) return;
       reso.total++;
@@ -848,7 +937,9 @@ function runPreflight() {
     // ---------- 树遍历 ----------
     // 单个对象: 按 typename 分派(可见性已由 walkLayer 的图层过滤保证,
     // 无需再传 vis 标志 —— v4.8 清理死参数)
-    function visitItem(it, depth) {
+    // v10.0: 第三参 skipBleed —— 组级剪枝命中后向整棵子树传递"跳过出血测量"
+    //   (只跳出血, 其余检查照常), 缺省 undefined = 不跳过。
+    function visitItem(it, depth, skipBleed) {
       if (depth > 64) return; // 防异常深嵌套导致栈溢出(超过深度放弃下钻)
       var tn = "";
       try { tn = it.typename; } catch (eT) { return; }
@@ -859,8 +950,10 @@ function runPreflight() {
         try { gHidden = (it.hidden === true); } catch (eGv) {}
         if (gHidden) {
           sawHidden = true;   // v8.1: 见到隐藏组 ⇒ 内部可能有隐藏文字
-          if (underQuota("group")) hidden.itemCount++;
-          else hidden.truncated = true; // v4.8: 隐藏组超配额只挂 hidden 自己的截断
+          if (CK.hd) {        // v10.0: 卡②关 ⇒ 不计数(但 hidden 判定必须保留, 否则隐藏组会被当可见内容检查)
+            if (underQuota("group")) hidden.itemCount++;
+            else hidden.truncated = true; // v4.8: 隐藏组超配额只挂 hidden 自己的截断
+          }
           return;
         }
         // v8.6: 组级出血测量改为"只在子项读不出来时兜底" —— 原来无条件先测一次, 而组的
@@ -868,12 +961,46 @@ function runPreflight() {
         //   会把它的超出算进出血(measureItem 每边取 max) ⇒ 可能**漏报出血不足**, 与"隐藏
         //   内容不参与印刷统计"的口径相悖。可见子项本就各自测过(取 max, 天然幂等) ⇒ 正常
         //   路径上组级测量既冗余又有害; 只有读不到子项时它才是唯一测量, 那时才该兜。
+        // v10.0(移植自分支 v8.7.2): 出血组级剪枝 —— 组 geometricBounds 是子项 bounds 的
+        //   并集(**含隐藏子项**,故恒 ⊇ 任一可见子项)。若组 bounds 完整落在某个画板内、
+        //   且与其他画板均不相交, 则每个可见子项也必然完整落在该画板内 ⇒ 四向超出量恒 ≤0、
+        //   不会刷新任何极值; 唯一会被写入的状态是该画板的 hasContent —— 这里直接补写,
+        //   结果与逐子项测量完全一致。收益: 组内成千上万个路径不再逐个读 geometricBounds
+        //   (AI 要逐段算贝塞尔包围盒, 是本面板最大的单项耗时)。
+        //   ⚠ 剪枝**只跳出血测量**, 组内字体/油墨/分辨率检查照常下钻。
+        var childSkip = (skipBleed === true);
         try {
           var kids = it.pageItems;
-          for (var k = 0; k < kids.length; k++) visitItem(kids[k], depth + 1);
+          var kLim = kids.length; // v10.0: 长度外提(剪枝条件与循环条件原来各重读一轮)
+          if (!childSkip && CK.ab && kLim > 0) {
+            try {
+              var ggb = it.geometricBounds;
+              if (ggb && ggb.length === 4) {
+                var inA = -1, canPrune = true;
+                for (var gbi = 0; gbi < abRects.length; gbi++) {
+                  var gr = abRects[gbi];
+                  if (ggb[0] >= gr[0] && ggb[2] <= gr[2] && ggb[1] <= gr[1] && ggb[3] >= gr[3]) {
+                    if (inA === -1) inA = gbi; // 完整落入该画板
+                  } else if (!(ggb[2] < gr[0] || ggb[0] > gr[2] || ggb[1] < gr[3] || ggb[3] > gr[1])) {
+                    canPrune = false; // 与某画板部分相交(可能跨界) ⇒ 子项必须逐个测
+                    break;
+                  }
+                }
+                if (canPrune && inA !== -1) {
+                  childSkip = true;
+                  for (var gh = 0; gh < abRects.length; gh++) {
+                    var ghr = abRects[gh];
+                    if (ggb[0] >= ghr[0] && ggb[2] <= ghr[2] && ggb[1] <= ghr[1] && ggb[3] >= ghr[3])
+                      abBleed[gh].hasContent = true; // 复刻"子项落在画板内"必写的 hasContent
+                  }
+                }
+              }
+            } catch (eGg) {}
+          }
+          for (var k = 0; k < kLim; k++) visitItem(kids[k], depth + 1, childSkip);
         } catch (eGk) {
           sawHidden = true;   // v8.1: 组内读不到 ⇒ 不敢断言"无隐藏"
-          bleedOf(it, false); // v5.25 兜底: 子项没下钻成, 退回组级 bounds, 别漏测
+          if (!childSkip) bleedOf(it, false); // v5.25 兜底;v10.0 已剪枝的组 bounds 必在画板内,无需兜底
         }
         return;
       }
@@ -895,99 +1022,106 @@ function runPreflight() {
       // 隐藏对象统计(每类独立配额);隐藏内容不输出 → 跳过一切印刷相关检查
       if (selfHidden) {
         sawHidden = true;   // v8.1: 见到隐藏对象(可能是隐藏文本框) ⇒ 需保留隐藏文字扫描
-        if (underQuota(cat)) hidden.itemCount++;
-        else hidden.truncated = true; // v5.6/B1: 超配额也必须挂截断标记,否则隐藏数被低估且界面无提示
+        if (CK.hd) {        // v10.0: 卡②关 ⇒ 不计数(hidden 判定保留: 隐藏内容不参与一切印刷检查)
+          if (underQuota(cat)) hidden.itemCount++;
+          else hidden.truncated = true; // v5.6/B1: 超配额也必须挂截断标记,否则隐藏数被低估且界面无提示
+        }
         return;
       }
 
       if (tn === "TextFrame") {
-        bleedOf(it, false); // v5.25: 出血先于配额(配额只截断统计,不截断出血测量)
+        if (!skipBleed) bleedOf(it, false); // v5.25 出血先于配额;v10.0 剪枝子树跳过出血
         // v4.8: 配额检查前置,totalText 只统计实际扫描数(原在配额前++,超限仍虚增)
         if (!underQuota("text")) { fonts.truncated = true; return; }
-        fonts.totalText++;
+        if (CK.ft) fonts.totalText++; // v10.0: 卡③关 ⇒ 不计文本总数
         // v8.5: characterAttributes 只解析一次 —— 原实现每步都重新解析
         //   textRange.characterAttributes(字体名 / 字号 / 填充色给油墨 / 填充色给极浅 / 叠印 共 5 遍),
         //   同一帧要付 5 次链解析的跨桥成本;现在一次取回 ca 全程复用。
+        // v10.0: 卡③(字体) ⑥(油墨) ⑦(叠印) 全关 ⇒ 连 characterAttributes 都不解析
         var ca = null;
-        try { ca = it.textRange.characterAttributes; } catch (eCa) { ca = null; }
-        var fn = "";
-        try { fn = ca.textFont.name; }
-        catch (e3) {
-          // v8.8: 混合字体帧(或字体名读不出)无法判缺。旧实现在这里整帧放行、一声不响，
-          //   而"一帧里已装字体 + 缺失字体混排"是最常见的真实漏报场景 ⇒ 至少计数上报。
-          fn = "(混合字体)";
-          fonts.mixedFonts++;
+        if (CK.ft || CK.ik || CK.ov) {
+          try { ca = it.textRange.characterAttributes; } catch (eCa) { ca = null; }
         }
-        if (fn && !seen[fn]) { seen[fn] = true; fonts.names.push(fn); }
-        // v8.6: 片段只取一次 —— pfSnippet 是一次跨桥读(contents)+正则, 原来本帧最多被调
-        //   4 次(极小字号/油墨入桶/极浅样本/叠印样本); 而"油墨入桶"那条是无条件执行的,
-        //   所以提前取一次不增加干净帧的成本, 出问题的帧则省下 1~3 次读。
-        var snip = pfSnippet(it);
-        // v5.15: 极小字号检测(混合字号帧读 size 会抛异常,跳过不误报)
-        try {
-          var fsz = ca.size;
-          if (typeof fsz === "number" && isFinite(fsz) && fsz > 0 && fsz < TINY_PT) {
-            tiny.count++;
-            if (fsz < TINY_BAD_PT) tiny.badCount++; // v6.8: <5pt 额外计入重度(嵌套)
-            if (tiny.samples.length < 5) tiny.samples.push({ t: snip, pt: pfRound(fsz) });
+        // v8.6: 片段只取一次 —— pfSnippet 是一次跨桥读(contents)+正则
+        // v10.0: 且只在有卡真的要用它时才取(卡③极小字号样本 / ⑥油墨样本 / ⑦叠印样本)
+        var snip = (CK.ft || CK.ik || CK.ov) ? pfSnippet(it) : "";
+        if (CK.ft) {
+          var fn = "";
+          try { fn = ca.textFont.name; }
+          catch (e3) {
+            // v8.8: 混合字体帧(或字体名读不出)无法判缺。旧实现在这里整帧放行、一声不响，
+            //   而"一帧里已装字体 + 缺失字体混排"是最常见的真实漏报场景 ⇒ 至少计数上报。
+            fn = "(混合字体)";
+            fonts.mixedFonts++;
           }
-        } catch (eSz) {}
-        // v8.5: 填充色一次读出"油墨总量 + 极浅"(等价于原 pfTextInk + pfLightChannel 两次读数);
-        //   ca 解析失败或混合色仍按旧口径记 mixed。
-        var rtx = null, fcTx = null;
-        if (!ca) { rtx = { total: -1, type: "mixed", desc: "混合颜色" }; }
-        else {
-          try { fcTx = ca.fillColor; } catch (eFc) { fcTx = null; }
-          try { rtx = pfInkLightBoth(fcTx); } catch (eTi) { rtx = { total: -1, type: "mixed", desc: "混合颜色" }; }
-        }
-        if (rtx) inkBucket(black.text, rtx, snip, "填充");
-        // v6.2: 色值极浅(文字填充色)
-        // v7.8: 按不同色值收(与图形侧同一个池),n 累加全量次数
-        if (rtx && rtx.light) {
-          black.light.count++;
-          var ltfName = snip;
-          pfSampleAdd(black.light.samples,
-            { src: "text", where: "填充", desc: rtx.light, name: ltfName },
-            rtx.light + "|填充|" + ltfName + "|text", SAMPLE_CAP);
-        }
-        // v8.3: 叠印检查(文字侧)——**只能走字符级**,真机 28.0.0 上 TextFrame 没有
-        //   pageItem 级 fillOverprint/strokeOverprint(探针 v1 实测为"缺失")。
-        //   两个布尔读很便宜(characterAttributes 本来就已读过),命中才取色值 + 片段。
-        //   v8.5: 复用同一个 ca,不再重新解析。
-        try {
-          var ovf = pfCharOvpFill(ca), ovs = pfCharOvpStroke(ca);
-          if (ovf || ovs) {
-            if (ovf) pfOvpAdd("text", "填充", fcTx, snip, it);
-            if (ovs) {
-              // v8.6: 描边色只在真的命中叠印描边时才读(多数帧不描边, 这一读可省)
-              var scTx = null; try { scTx = ca.strokeColor; } catch (eSc) {}
-              pfOvpAdd("text", "描边", scTx, snip, it);
+          if (fn && !seen[fn]) { seen[fn] = true; fonts.names.push(fn); }
+          // v5.15: 极小字号检测(混合字号帧读 size 会抛异常,跳过不误报)
+          try {
+            var fsz = ca.size;
+            if (typeof fsz === "number" && isFinite(fsz) && fsz > 0 && fsz < TINY_PT) {
+              tiny.count++;
+              if (tiny.samples.length < 5) tiny.samples.push({ t: snip, pt: pfRound(fsz) });
             }
+          } catch (eSz) {}
+        }
+        var rtx = null, fcTx = null;
+        if (CK.ik) {
+          // v8.5: 填充色一次读出"油墨总量 + 极浅";ca 解析失败或混合色仍按旧口径记 mixed。
+          if (!ca) { rtx = { total: -1, type: "mixed", desc: "混合颜色" }; }
+          else {
+            try { fcTx = ca.fillColor; } catch (eFc) { fcTx = null; }
+            try { rtx = pfInkLightBoth(fcTx); } catch (eTi) { rtx = { total: -1, type: "mixed", desc: "混合颜色" }; }
           }
-        } catch (eOvp) {}
+          if (rtx) inkBucket(black.text, rtx, snip, "填充");
+          // v6.2: 色值极浅(文字填充色);v7.8: 按不同色值收,n 累加全量次数
+          if (rtx && rtx.light) {
+            black.light.count++;
+            var ltfName = snip;
+            pfSampleAdd(black.light.samples,
+              { src: "text", where: "填充", desc: rtx.light, name: ltfName },
+              rtx.light + "|填充|" + ltfName + "|text", SAMPLE_CAP);
+          }
+        }
+        if (CK.ov) {
+          // v8.3: 叠印检查(文字侧)——**只能走字符级**,真机 28.0.0 上 TextFrame 没有
+          //   pageItem 级 fillOverprint/strokeOverprint(探针 v1 实测为"缺失")。
+          //   v10.0: 卡⑥关时上面的 fcTx 尚未读出, 这里补读一次(仅叠印命中才用到)。
+          if (!CK.ik && ca) { try { fcTx = ca.fillColor; } catch (eFc2) { fcTx = null; } }
+          try {
+            var ovf = pfCharOvpFill(ca), ovs = pfCharOvpStroke(ca);
+            if (ovf || ovs) {
+              if (ovf) pfOvpAdd("text", "填充", fcTx, snip, it);
+              if (ovs) {
+                // v8.6: 描边色只在真的命中叠印描边时才读(多数帧不描边, 这一读可省)
+                var scTx = null; try { scTx = ca.strokeColor; } catch (eSc) {}
+                pfOvpAdd("text", "描边", scTx, snip, it);
+              }
+            }
+          } catch (eOvp) {}
+        }
         return;
       }
       if (tn === "PathItem") {
-        bleedOf(it, true);  // v5.25: 出血先于配额(配额只截断统计,不截断出血测量)
+        if (!skipBleed) bleedOf(it, true);  // v5.25 出血先于配额;v10.0 剪枝子树跳过出血
         if (!underQuota("path")) { black.path.truncated = true; return; }
         scanPathInk(it);
         return;
       }
       if (tn === "CompoundPathItem") {
-        bleedOf(it, true);  // v5.25: 出血先于配额(配额只截断统计,不截断出血测量)
+        if (!skipBleed) bleedOf(it, true);  // v5.25 出血先于配额;v10.0 剪枝子树跳过出血
         if (!underQuota("compound")) { black.path.truncated = true; return; }
         try { scanPathInk(it.pathItems[0]); } catch (eC) {}
         return;
       }
       if (tn === "MeshItem") {
-        bleedOf(it, false); // v5.25: 出血先于配额(配额只截断统计,不截断出血测量)
+        if (!skipBleed) bleedOf(it, false); // v5.25 出血先于配额;v10.0 剪枝子树跳过出血
         // v8.8: 网格对象只测出血、本来就没有自己的统计桶 ⇒ 这里没有可标记的 truncated，
         //   配额只起限速作用(与 SymbolItem 不同，那边是真把数字少算了)。
         underQuota("mesh");
         return;
       }
       if (tn === "SymbolItem") {
-        bleedOf(it, false); // v5.25: 出血先于配额(配额只截断统计,不截断出血测量)
+        if (!skipBleed) bleedOf(it, false); // v5.25 出血先于配额;v10.0 剪枝子树跳过出血
         // v8.8: 计数移到配额判断**之前** —— 原顺序在超配额后连"符号 N 个"这个数字本身
         //   也停止累加，面板数字被静默少算且无任何提示。配额只该截断"下钻扫描"。
         symbols.count++;
@@ -1005,14 +1139,15 @@ function runPreflight() {
           }
           if (symSrc && symSrc.pageItems) {
             var symKids = symSrc.pageItems;
-            for (var sk = 0; sk < symKids.length; sk++) visitItem(symKids[sk], depth + 1);
+            var skLim = symKids.length; // v10.0: 长度外提
+            for (var sk = 0; sk < skLim; sk++) visitItem(symKids[sk], depth + 1);
             symbols.scanned++;
           }
         } catch (eSym) {}
         return;
       }
       if (tn === "RasterItem") {
-        bleedOf(it, false); // v5.25: 出血先于配额(配额只截断统计,不截断出血测量)
+        if (!skipBleed) bleedOf(it, false); // v5.25 出血先于配额;v10.0 剪枝子树跳过出血
         if (!underQuota("raster")) { reso.truncated = true; imgs.truncated = true; return; }
         imgs.embeddedCount++; // v5.7: 只统计可见的嵌入位图
         resoCheck(it, embName(it, rasterIdx, "(嵌入位图" + (rasterIdx + 1) + ")"));
@@ -1020,29 +1155,34 @@ function runPreflight() {
         return;
       }
       // PlacedItem
-      bleedOf(it, false); // v5.25: 出血先于配额(配额只截断统计,不截断出血测量)
+      if (!skipBleed) bleedOf(it, false); // v5.25 出血先于配额;v10.0 剪枝子树跳过出血
       if (!underQuota("placed")) { reso.truncated = true; imgs.truncated = true; return; }
-      imgs.linkedCount++; // v5.7: 只统计可见的链接图(隐藏链接图不参与印刷,不计入)
-      // v5.15: 源文件存在性——被移动/改名/未随包拷贝的链接 AI 输出时会用
-      // 低清预览替代;仅 file.exists 明确为 false 才计缺失,读不到不算
       var lkMissing = false;
-      try { lkMissing = (it.file.exists === false); } catch (eEx2) {}
-      if (lkMissing) imgs.missingCount++;
-      // 文件路径只读一次: 前 5 个用于展示(v6.5: 50→5,列表统一"仅列前 5"),同时取扩展名判断位图/矢量
       var fp = "";
-      try { fp = String(it.file.fsName); } catch (e11) {}
-      if (imgs.linked.length < 5) {
+      if (CK.im) { // v10.0: 卡④关 ⇒ 不读 file.exists、不进清单
+        imgs.linkedCount++; // v5.7: 只统计可见的链接图(隐藏链接图不参与印刷,不计入)
+        // v5.15: 源文件存在性——被移动/改名/未随包拷贝的链接 AI 输出时会用
+        // 低清预览替代;仅 file.exists 明确为 false 才计缺失,读不到不算
+        try { lkMissing = (it.file.exists === false); } catch (eEx2) {}
+        if (lkMissing) imgs.missingCount++;
+      }
+      // 文件路径只读一次: 前 5 个用于展示(v6.5: 50→5),同时取扩展名判断位图/矢量
+      // v10.0: 卡④⑤都关 ⇒ 连路径都不读
+      if (CK.im || CK.rs) { try { fp = String(it.file.fsName); } catch (e11) {} }
+      if (CK.im && imgs.linked.length < 5) {
         imgs.linked.push({ name: it.name || "(链接图)", file: fp || "(无法读取路径)", missing: lkMissing });
       }
       // 矢量链接(PDF/AI/EPS/SVG)没有有效分辨率: identity 矩阵会被算成
-      // 72ppi 而误报"低于300ppi",只对位图扩展名检查(v3.6);
-      // 扩展名拿不到时保守起见仍检查(与旧版一致)
+      // 72ppi 而误报"低于300ppi", 只跳过已知矢量(v3.6)。
+      // v10.8: 位图"白名单"反转为矢量"跳过表" —— 原先名单外的扩展名(如 webp/psb/heic)会被
+      //   静默跳过不查, 而扩展名读不到(空串)反而照查, 两边松紧不一致; 反转后除已知矢量外
+      //   一律检查(宁多查、不漏查, 与"空串照查"同一方向)。
       var extB = "";
       var dotB = fp.lastIndexOf(".");
       if (dotB >= 0) extB = fp.substring(dotB + 1).toLowerCase();
-      var isBmp = (extB === "tif" || extB === "tiff" || extB === "jpg" || extB === "jpeg" ||
-                   extB === "png" || extB === "psd" || extB === "bmp" || extB === "gif");
-      if (isBmp || extB === "") {
+      var isVec = (extB === "ai" || extB === "ait" || extB === "pdf" || extB === "eps" ||
+                   extB === "svg" || extB === "svgz");
+      if (CK.rs && !isVec) { // v10.0: 卡⑤关 ⇒ 不去读 item.name/file 拼标签
         resoCheck(it, imgName(it, "(链接图" + (placedIdx + 1) + ")"));
       }
       placedIdx++;
@@ -1054,16 +1194,19 @@ function runPreflight() {
       try { if (ly.visible === false) { sawHidden = true; return; } } catch (eLv) { sawHidden = true; return; }
       try {
         var subs = ly.layers;
-        for (var si = 0; si < subs.length; si++) walkLayer(subs[si], depth + 1);
+        var sLim = subs.length; // v10.0: 长度外提
+        for (var si = 0; si < sLim; si++) walkLayer(subs[si], depth + 1);
       } catch (eLs) { sawHidden = true; }   // v8.1: 子图层读不到 ⇒ 不敢断言"无隐藏"
       try {
         var items = ly.pageItems;
-        for (var ii = 0; ii < items.length; ii++) visitItem(items[ii], 0);
+        var iLim = items.length; // v10.0: 长度外提
+        for (var ii = 0; ii < iLim; ii++) visitItem(items[ii], 0);
       } catch (eLi) { sawHidden = true; }   // v8.1: 对象列表读不到 ⇒ 同上
     }
     try {
       var topLayers = doc.layers;
-      for (var liW = 0; liW < topLayers.length; liW++) walkLayer(topLayers[liW], 0);
+      var tLim = topLayers.length; // v10.0: 长度外提
+      for (var liW = 0; liW < tLim; liW++) walkLayer(topLayers[liW], 0);
     } catch (eW) { sawHidden = true; }      // v8.1: 顶层图层读不到 ⇒ 同上
 
     // ---------- v5.21: 隐藏文字统计 ----------
@@ -1077,7 +1220,7 @@ function runPreflight() {
     //   才可能存在"隐藏文字";一个都没遇到时隐藏文字必然为 0,于是这次"文档级 textFrames
     //   全量扫描(封顶 500 帧,每帧还都要沿 parent 链判可见性)"可以整段跳过。
     //   ⚠ 只要有任何读取异常都置 sawHidden=true,宁可多扫不多漏(见 walkLayer/visitItem)。
-    if (sawHidden) {
+    if (sawHidden && CK.ft) { // v10.0: 卡③关 ⇒ 隐藏文字(字体)补扫整段跳过
       try {
         var dtfsAll = doc.textFrames;
         var capHT = dtfsAll.length > 500 ? 500 : dtfsAll.length;
@@ -1185,6 +1328,10 @@ function runPreflight() {
 // unlockAll=true 时解锁; showAll=true 时显示; 可单独或同时
 // ============================================================
 function pfUnlockLayer(layer, unlockAll, showAll) {
+  // v10.8: 未勾「显示」时, 隐藏图层整棵跳过 —— 隐藏内容不参与检查(卡内已明示),
+  //   也不该被「解锁全部」改掉锁定状态(清除叠印/转曲共用本函数);
+  //   勾了「显示」则照常(先显示后解锁, 隐藏层一并处理)。读取失败保守放行(维持旧行为)。
+  if (!showAll) { try { if (layer.visible === false) return; } catch (eV) {} }
   if (unlockAll) { try { layer.locked = false; } catch (e) {} }
   if (showAll) { try { layer.visible = true; } catch (e) {} }
   try {

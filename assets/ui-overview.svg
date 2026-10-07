@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 660 556" font-family="Microsoft YaHei, PingFang SC, sans-serif">
+  <rect x="0" y="0" width="660" height="556" fill="#151517"/>
+
+  <!-- 顶栏 -->
+  <rect x="0" y="0" width="660" height="46" fill="#2c2c2e"/>
+  <rect x="14" y="13" width="10" height="20" rx="2" fill="#E5C851"/>
+  <rect x="22" y="13" width="10" height="20" rx="2" fill="#61BEE2"/>
+  <text x="42" y="28" font-size="14" font-weight="600" fill="#ffffff">印前检查-雪糕</text>
+  <text x="146" y="28" font-size="11" fill="#888888">v10.9</text>
+  <circle cx="524" cy="23" r="7" fill="none" stroke="#b8b8b8" stroke-width="1.6"/>
+  <circle cx="524" cy="23" r="2.2" fill="#b8b8b8"/>
+  <rect x="546" y="8" width="100" height="30" rx="15" fill="#0e639c"/>
+  <text x="596" y="27" font-size="13" font-weight="600" fill="#ffffff" text-anchor="middle">开始检查</text>
+
+  <!-- 卡① -->
+  <rect x="10" y="56" width="640" height="52" rx="10" fill="#1b1b1c"/>
+  <rect x="10" y="56" width="640" height="13" rx="10" fill="#2c2c2e"/>
+  <rect x="10" y="69" width="640" height="13" fill="#2c2c2e"/>
+  <text x="20" y="73" font-size="12" font-weight="600" fill="#d8d8d8">① 画板 · 出血 · 色彩</text>
+  <rect x="532" y="60" width="42" height="18" rx="9" fill="#333333"/><text x="553" y="73" font-size="11" fill="#4ec98a" text-anchor="middle">CMYK</text>
+  <rect x="580" y="60" width="60" height="18" rx="9" fill="#4a3a14"/><text x="610" y="73" font-size="11" fill="#e8b93e" text-anchor="middle">出血不足</text>
+  <text x="20" y="97" font-size="12" fill="#d8d8d8">画板 1 — 540 × 380 mm · 出血 上 0mm · 下 0mm · 右 2.9mm</text>
+
+  <!-- 卡② -->
+  <rect x="10" y="118" width="640" height="52" rx="10" fill="#1b1b1c"/>
+  <rect x="10" y="118" width="640" height="13" rx="10" fill="#2c2c2e"/>
+  <rect x="10" y="131" width="640" height="13" fill="#2c2c2e"/>
+  <text x="20" y="135" font-size="12" font-weight="600" fill="#d8d8d8">② 隐藏图层 · 对象</text>
+  <rect x="586" y="122" width="44" height="18" rx="9" fill="#4a1d1a"/><text x="608" y="135" font-size="11" fill="#f06a55" text-anchor="middle">3 个</text>
+  <text x="20" y="159" font-size="12" fill="#d8d8d8">隐藏图层 1 个 · 隐藏对象 2 个</text>
+
+  <!-- 卡③ -->
+  <rect x="10" y="180" width="640" height="52" rx="10" fill="#1b1b1c"/>
+  <rect x="10" y="180" width="640" height="13" rx="10" fill="#2c2c2e"/>
+  <rect x="10" y="193" width="640" height="13" fill="#2c2c2e"/>
+  <text x="20" y="197" font-size="12" font-weight="600" fill="#d8d8d8">③ 字体 · 转曲</text>
+  <rect x="492" y="184" width="78" height="18" rx="9" fill="#4a1d1a"/><text x="531" y="197" font-size="11" fill="#f06a55" text-anchor="middle">未转曲 12 个</text>
+  <rect x="576" y="184" width="64" height="18" rx="9" fill="#4a3a14"/><text x="608" y="197" font-size="11" fill="#e8b93e" text-anchor="middle">小字号 2</text>
+  <text x="20" y="221" font-size="12" fill="#d8d8d8">字体: Source Han Serif SC, Arial · 另有 2 个隐藏文字未转曲</text>
+
+  <!-- 卡④ -->
+  <rect x="10" y="242" width="640" height="52" rx="10" fill="#1b1b1c"/>
+  <rect x="10" y="242" width="640" height="13" rx="10" fill="#2c2c2e"/>
+  <rect x="10" y="255" width="640" height="13" fill="#2c2c2e"/>
+  <text x="20" y="259" font-size="12" font-weight="600" fill="#d8d8d8">④ 图片嵌入</text>
+  <rect x="570" y="246" width="60" height="18" rx="9" fill="#333333"/><text x="600" y="259" font-size="11" fill="#4ec98a" text-anchor="middle">全部嵌入</text>
+  <text x="20" y="283" font-size="12" fill="#d8d8d8">嵌入图片: 5 张 · 链接图片: 0 张</text>
+
+  <!-- 卡⑤ -->
+  <rect x="10" y="304" width="640" height="52" rx="10" fill="#1b1b1c"/>
+  <rect x="10" y="304" width="640" height="13" rx="10" fill="#2c2c2e"/>
+  <rect x="10" y="317" width="640" height="13" fill="#2c2c2e"/>
+  <text x="20" y="321" font-size="12" font-weight="600" fill="#d8d8d8">⑤ 图片分辨率</text>
+  <rect x="554" y="308" width="76" height="18" rx="9" fill="#4a3a14"/><text x="592" y="321" font-size="11" fill="#e8b93e" text-anchor="middle">有 1 张偏低</text>
+  <text x="20" y="345" font-size="12" fill="#d8d8d8">R1.jpg — 188 ppi</text>
+
+  <!-- 卡⑥ -->
+  <rect x="10" y="366" width="640" height="52" rx="10" fill="#1b1b1c"/>
+  <rect x="10" y="366" width="640" height="13" rx="10" fill="#2c2c2e"/>
+  <rect x="10" y="379" width="640" height="13" fill="#2c2c2e"/>
+  <text x="20" y="383" font-size="12" font-weight="600" fill="#d8d8d8">⑥ 油墨 · 描边粗细</text>
+  <rect x="566" y="370" width="64" height="18" rx="9" fill="#4a1d1a"/><text x="598" y="383" font-size="11" fill="#f06a55" text-anchor="middle">超标 2 处</text>
+  <text x="20" y="407" font-size="12" fill="#d8d8d8">[图形] 油墨总量 315 — C85 M80 Y75 K75 · 0.08mm ×3</text>
+
+  <!-- 卡⑦ -->
+  <rect x="10" y="428" width="640" height="52" rx="10" fill="#1b1b1c"/>
+  <rect x="10" y="428" width="640" height="13" rx="10" fill="#2c2c2e"/>
+  <rect x="10" y="441" width="640" height="13" fill="#2c2c2e"/>
+  <text x="20" y="445" font-size="12" font-weight="600" fill="#d8d8d8">⑦ 叠印</text>
+  <rect x="578" y="432" width="52" height="18" rx="9" fill="#333333"/><text x="604" y="445" font-size="11" fill="#4ec98a" text-anchor="middle">无叠印</text>
+  <text x="20" y="469" font-size="12" fill="#999999">隐藏对象与图层不参与叠印检查。</text>
+
+  <text x="330" y="516" font-size="10" fill="#666666" text-anchor="middle">示意图 · 数据为示例，实际以面板为准</text>
+</svg>

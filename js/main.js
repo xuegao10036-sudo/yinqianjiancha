@@ -2,11 +2,14 @@
 (function () {
   "use strict";
 
-  var JS_BUILD = "20260930-9";
+  var JS_BUILD = "20261007-12";
   // 必须与 jsx/preflight.jsx 里的 PF_BUILD 保持一致。
   // JSX 每次返回都会带上它的构建号,前端据此判断 ExtendScript 引擎里
   // 加载的是不是当前版本 —— 不一致就强制 $.evalFile 重载(见 execJsx)。
-  var JSX_BUILD = "9.9";
+  var JSX_BUILD = "10.9";
+  // v10.2 收尾: 「耗时较长」提示阈值 —— 原先 20000 在 run() 与 execAction() 各写一遍,
+  //   连提示语里的「20 秒」也是手写 ⇒ 改口径要动 3 处、漏一处就文案与行为不一致。收成一处。
+  var BUSY_TIMEOUT_MS = 20000;
 
   // 全局错误捕获: 把任何未捕获异常显示到面板,便于定位"空白"问题
   window.onerror = function (msg, url, line, col) {
@@ -176,6 +179,360 @@
       (hintText ? '<span class="row-h">' + esc(hintText) + "</span>" : "") + "</div>";
   }
 
+  // ---------- v10.0: 七卡开关(设置弹层) ----------
+  // 卡片顺序与 jsx 的 CK 一一对应: ①ab画板出血 ②hd隐藏 ③ft字体 ④im嵌入 ⑤rs分辨率 ⑥ik油墨描边 ⑦ov叠印
+  var CK_NAMES = ["画板 · 出血 · 色彩", "隐藏图层 · 对象", "字体 · 转曲", "图片嵌入", "图片分辨率", "油墨 · 描边粗细", "叠印"];
+  // v10.1: 卡片显示顺序(位置 -> 卡号)。拖动只改显示; 传给 jsx 的开关仍按固定卡序(ckArgs)
+  var CARD_ORDER = [0, 1, 2, 3, 4, 5, 6];
+  var CARD_CK = [true, true, true, true, true, true, true];
+  // SCAN_CK = 本轮扫描实际用的开关快照 —— 渲染占位卡按它判,
+  //   避免"扫描后又改勾选"拿旧数据/空数据当新结果显示。
+  var SCAN_CK = null;
+  try {
+    var ckSaved = localStorage.getItem("pf_cards");
+    if (ckSaved !== null && /^[01]{7}$/.test(ckSaved)) {
+      for (var ckI = 0; ckI < 7; ckI++) CARD_CK[ckI] = ckSaved.charAt(ckI) === "1";
+    }
+  } catch (eCK) {}
+
+  // ---------- v10.1: 阈值(唯一真源在 jsx 的 PF_TH_DEF) ----------
+  //   前端**不保存任何阈值默认值**: 默认由 jsx 的 pfThDefaults() 下发;
+  //   用户改动只存"改动项"于 localStorage["pf_th"](竖线分隔, 与 jsx pfThApply 的 keys 同序),
+  //   扫描时作为 runPreflight 的第 8 参传回 jsx; 生效值再由 res.th 回传供渲染显示。
+  //   ⇒ 以后调阈值只改 jsx 一处(PF_TH_DEF), 面板判定与文案自动跟随。
+  // v10.2: 去掉「其中重度」(tinyBad) —— 字号只留一条判定(<tiny 直接标红)。
+  var TH_KEYS = ["bleed", "reso", "thin", "tiny", "inkOk", "inkWarn"];
+  // ⚠ 老用户 localStorage 里的 pf_th 是 v10.1 的 7 项格式(含 tinyBad)。
+  //   线序靠"字段数"区分: 7 项按旧线序读、6 项按新线序读 —— 否则会把 inkOk 当 tinyBad 用,
+  //   判定拿错数字而且毫无提示(油墨阈值变成 5/220 ⇒ 满屏标红)。
+  var TH_KEYS_V101 = ["bleed", "reso", "thin", "tiny", "tinyBad", "inkOk", "inkWarn"];
+  var TH_DEF = null;    // jsx 下发的默认值(含 cap/scan/light 等非用户项)
+  var TH_PREF = null;   // 用户改过的项(只存改动)
+  var PF_TH = null;     // 显示用生效值 = 默认 ⊕ 改动; 扫描后由 res.th 校准
+
+  // 设置弹层里的阈值输入(顺序即界面顺序; step 只影响上下箭头粒度)
+  // v10.2: 顺序按"默认卡片顺序"排(雪糕点名: 第一个是出血不足) ——
+  //   出血(卡①) → 极小字号(卡③) → 分辨率(卡⑤) → 描边 / 油墨(卡⑥)。
+  //   ⚠ 这里只管**界面顺序**; 传给 jsx 的线序另由 TH_KEYS 决定, 两者不必同序。
+  var TH_FIELDS = [
+    { k: "bleed",   label: "出血不足",       unit: "mm",  step: "0.5" },
+    { k: "tiny",    label: "极小字号低于",   unit: "pt",  step: "0.5" },
+    { k: "reso",    label: "图片分辨率低于", unit: "ppi", step: "1" },
+    { k: "thin",    label: "描边细于",       unit: "mm",  step: "0.05" },
+    { k: "inkOk",   label: "油墨总量偏重",   unit: "",    step: "5" },
+    { k: "inkWarn", label: "油墨总量超标",   unit: "",    step: "5" }
+  ];
+
+  function thParse(s) {   // "3|300|..." -> {bleed:3, reso:300, ...}; 非数字/<=0 的项忽略
+    if (!s) return null;
+    var p = String(s).split("|"), o = {}, i, v, any = false;
+    // v10.2: 7 项 = v10.1 旧格式，按旧线序读；只留当前键，旧格式里的 tinyBad 自然被丢弃
+    var ks = (p.length === TH_KEYS_V101.length) ? TH_KEYS_V101 : TH_KEYS;
+    for (i = 0; i < ks.length; i++) {
+      if (TH_KEYS.indexOf(ks[i]) < 0) continue;
+      v = parseFloat(p[i]);
+      if (!isNaN(v) && isFinite(v) && v > 0) { o[ks[i]] = v; any = true; }
+    }
+    return any ? o : null;
+  }
+  function thWire(o) {   // {..} -> "3|300|..."; 缺项留空(jsx 侧回落默认)
+    if (!o) return "";
+    var a = [], i, v;
+    for (i = 0; i < TH_KEYS.length; i++) {
+      v = o[TH_KEYS[i]];
+      a.push(v === undefined || v === null ? "" : v);
+    }
+    return a.join("|");
+  }
+  // jsx 第 8 参(字符串字面量)。空串 ⇒ jsx 的 pfThApply 逐项回落 PF_TH_DEF
+  function thArg() { return '"' + thWire(TH_PREF) + '"'; }
+  function thSave() {
+    try {
+      var w = thWire(TH_PREF);
+      if (w) localStorage.setItem("pf_th", w); else localStorage.removeItem("pf_th");
+    } catch (eT) {}
+  }
+  try { TH_PREF = thParse(localStorage.getItem("pf_th")); } catch (eT0) {}
+
+  function thEffV(k) {   // 某项的当前打算值(改动优先, 否则默认)
+    if (TH_PREF && TH_PREF[k] !== undefined) return TH_PREF[k];
+    if (TH_DEF && TH_DEF[k] !== undefined) return TH_DEF[k];
+    return undefined;
+  }
+  function thRefresh() {  // 重算显示用生效值
+    PF_TH = {};
+    for (var i = 0; i < TH_KEYS.length; i++) {
+      var v = thEffV(TH_KEYS[i]);
+      if (v !== undefined) PF_TH[TH_KEYS[i]] = v;
+    }
+  }
+  // 渲染取阈值: 优先本次回传的生效值, 其次上次值; 都没有给 "?"(宁可见问号也不猜数字)
+  function thv(k) { return (PF_TH && PF_TH[k] !== undefined && PF_TH[k] !== null) ? PF_TH[k] : "?"; }
+
+  // 取"当前生效阈值": 已有默认值则直接算; 否则问 jsx 要一次默认值(只回默认, 不扫描文档)
+  var thBusy = false, thQ = [];
+  function thEnsure(cb) {
+    if (TH_DEF) { thRefresh(); cb(); return; }
+    thQ.push(cb);
+    if (thBusy) return;
+    thBusy = true;
+    function fin() {
+      thBusy = false;
+      var q = thQ; thQ = [];
+      for (var i = 0; i < q.length; i++) { try { q[i](); } catch (eQ) {} }
+    }
+    if (!inCEP()) { thRefresh(); fin(); return; }
+    execJsx("pfThDefaults();", function (data) {
+      if (data && data.th) TH_DEF = data.th;
+      thRefresh();
+      fin();
+    });
+  }
+
+  // ---------- v10.1: 阈值草稿 —— 输入框先写草稿, 按「确认」才落盘(pf_th) ----------
+  //   为什么要草稿: 边打边存的话, 输入 300 的过程(3 → 30 → 300)会存三次; 而且"打开看看、
+  //   没想改"也会留下痕迹。草稿制: 「确认」= 落盘并关闭; 「关闭」= 放弃本次编辑。
+  var TH_DRAFT = null;   // null = 弹层没开; {..} = 正在编辑的那一份
+  function thDraftV(k) {   // 草稿值优先, 其次用户已存改动, 再次默认
+    if (TH_DRAFT && TH_DRAFT[k] !== undefined) return TH_DRAFT[k];
+    return thEffV(k);
+  }
+  function thDraftInit() {   // 起稿: 全量 7 项(拿不到默认值时退回上次生效值)
+    TH_DRAFT = {};
+    for (var i = 0; i < TH_KEYS.length; i++) {
+      var k = TH_KEYS[i];
+      var v = thEffV(k);
+      if (v === undefined && PF_TH && PF_TH[k] !== undefined) v = PF_TH[k];
+      if (v !== undefined) TH_DRAFT[k] = v;
+    }
+  }
+  function thDraftDiscard() { TH_DRAFT = null; }
+  function thDraftCommit() {   // 「确认」: 草稿 -> TH_PREF -> localStorage["pf_th"]
+    var i, k, v, o = null;
+    for (i = 0; i < TH_KEYS.length; i++) {
+      k = TH_KEYS[i];
+      v = (TH_DRAFT && TH_DRAFT[k] !== undefined) ? TH_DRAFT[k] : thEffV(k);
+      if (v === undefined) continue;
+      // 与默认值相同就不存 —— 让 pf_th 里只留真正改过的项
+      if (TH_DEF && TH_DEF[k] !== undefined && String(TH_DEF[k]) === String(v)) continue;
+      if (!o) o = {};
+      o[k] = v;
+    }
+    TH_PREF = o;
+    thSave();
+    thRefresh();
+  }
+  // 「重置默认」: 卡片开关全开 + 顺序复原 + 阈值清空(三项一起, 与按钮文案一致)
+  function thResetAll() {
+    var i;
+    for (i = 0; i < 7; i++) CARD_CK[i] = true;
+    ckSave();
+    CARD_ORDER = [0, 1, 2, 3, 4, 5, 6];
+    orderSave();
+    TH_PREF = null;
+    thSave();
+    thRefresh();
+    thDraftInit();
+  }
+  function fillDraftInputs() {   // 输入框一律显示草稿值
+    for (var i = 0; i < TH_FIELDS.length; i++) {
+      var k = TH_FIELDS[i].k;
+      var el = $("th_" + k);
+      if (el) {
+        var v = thDraftV(k);
+        el.value = (v === undefined) ? "" : v;
+      }
+    }
+  }
+  // 输入的联动纠正 —— 与 jsx pfThApply 的两条不变量同口径(只动草稿, 不落盘)
+  function onThChange(k, inp) {
+    var v = parseFloat(inp.value);
+    if (!TH_DRAFT) TH_DRAFT = {};
+    if (!isNaN(v) && isFinite(v) && v > 0) TH_DRAFT[k] = v; else delete TH_DRAFT[k];
+    var ov = thDraftV("inkOk"), wv = thDraftV("inkWarn");
+    if (ov !== undefined && wv !== undefined && wv <= ov) TH_DRAFT.inkWarn = ov + 1;
+    fillDraftInputs();
+  }
+
+  // ---------- v10.1: 卡片显示顺序(pf_order, 7 位数字 = 位置 -> 卡号) ----------
+  function orderSave() {
+    try { localStorage.setItem("pf_order", CARD_ORDER.join("")); } catch (eO) {}
+  }
+  // 拖动排序用到的两个纯逻辑 + 两个拖拽期变量
+  function orderMove(o, from, to) {   // 把 from 位置那张卡挪到 to 位置; 越界/原地返回副本
+    var a = o.slice(0);
+    if (from < 0 || from > 6 || to < 0 || to > 6 || from === to) return a;
+    var v = a.splice(from, 1)[0];
+    a.splice(to, 0, v);
+    return a;
+  }
+  function posFromY(list, y) {   // 光标 y 落在第几个"插入位"(按各行中线判)
+    var rs = list && list.children, n = rs ? rs.length : 0, i, r;
+    if (!n || !rs[0] || typeof rs[0].getBoundingClientRect !== "function") return -1;
+    for (i = 0; i < n; i++) {
+      r = rs[i].getBoundingClientRect();
+      if (y < r.top + r.height / 2) return i;
+    }
+    return n - 1;
+  }
+  var dragPos = -1, dragMove = null, dragUp = null;
+  try {
+    var oSaved = localStorage.getItem("pf_order");
+    if (oSaved && /^[0-6]{7}$/.test(oSaved)) {
+      var oArr = [], oOk = true, oK, oV;
+      for (oK = 0; oK < 7; oK++) {
+        oV = parseInt(oSaved.charAt(oK), 10);
+        if (oArr.indexOf(oV) >= 0) { oOk = false; break; }   // 必须是不重复的 0~6 全排列
+        oArr.push(oV);
+      }
+      if (oOk && oArr.length === 7) CARD_ORDER = oArr;
+    }
+  } catch (eO2) {}
+
+  function ckArgs() {
+    var a = [], i;
+    for (i = 0; i < 7; i++) a.push(CARD_CK[i] ? 1 : 0);
+    return a.join(",");
+  }
+  function ckSave() {
+    try {
+      var t = "", i;
+      for (i = 0; i < 7; i++) t += CARD_CK[i] ? "1" : "0";
+      localStorage.setItem("pf_cards", t);
+    } catch (eP) {}
+  }
+  // 已关闭的卡: 灰化占位(样式 .card-off / .chip.off), 不渲染任何数据
+  function offCard(title) {
+    return '<div class="card card-off"><div class="card-head"><span>' + esc(title) +
+      '</span><span class="chips"><span class="chip off">已关闭</span></span></div>' +
+      '<div class="card-body"><span class="dim">本轮未检查。在「设置」里勾选后点「开始检查」。</span></div></div>';
+  }
+
+  // 设置弹层: 勾选行按真实卡序生成(卡片名只在 CK_NAMES 维护一份, 与 es 侧同序)
+  function initSettings() {
+    var list = $("setList"), mask = $("setMask");
+    if (!list || !mask) return;
+    // v10.1: 关闭 = 放弃未确认的阈值草稿(开关与顺序是即时的, 不受影响)
+    function closeSet() { thDraftDiscard(); mask.classList.add("hidden"); }
+
+    // v10.1: 勾选行按 CARD_ORDER 渲染(卡号 i 仍对应 jsx 的 c1..c7)。
+    //   「①②③」序号已去掉; 顺序由右侧抓手**拖动**调整(初版的 ↑↓ 已按雪糕要求撤掉)。
+    function drawRows() {
+      var h = "", pos, i;
+      for (pos = 0; pos < 7; pos++) {
+        i = CARD_ORDER[pos];
+        h += '<div class="set-row' + (pos === dragPos ? " dragging" : "") + '">' +
+          '<label class="set-ck"><input type="checkbox" id="ck' + (i + 1) + '">' +
+          "<span>" + esc(CK_NAMES[i]) + "</span></label>" +
+          '<span class="grip" data-grip="' + pos + '" title="按住拖动，调整卡片上下顺序"></span></div>';
+      }
+      list.innerHTML = h;
+      for (pos = 0; pos < 7; pos++) {
+        (function (idx) {
+          var box = $("ck" + (idx + 1));
+          if (!box) return;
+          box.checked = CARD_CK[idx];
+          box.onchange = function () { CARD_CK[idx] = box.checked; ckSave(); };
+        })(CARD_ORDER[pos]);
+      }
+    }
+    // v10.1: 拖动排序 —— 抓手按下 → 光标移动时实时换位 → 松手落盘(pf_order)。
+    //   ⚠ 不用 HTML5 的 draggable: CEP 里拖影会残留在面板上; 自己接线还能给插入位实时反馈,
+    //     而且 orderMove/posFromY 是纯逻辑, 可以脱离浏览器直接测。
+    function endDrag() {
+      if (dragPos < 0) return;
+      dragPos = -1;
+      if (dragMove) { document.removeEventListener("mousemove", dragMove); dragMove = null; }
+      if (dragUp) { document.removeEventListener("mouseup", dragUp); dragUp = null; }
+      orderSave();
+      drawRows();
+    }
+    list.addEventListener("mousedown", function (e) {
+      var t = e.target;
+      if (!t || !t.getAttribute || t.getAttribute("data-grip") === null) return;
+      var p = parseInt(t.getAttribute("data-grip"), 10);
+      if (isNaN(p) || p < 0 || p > 6) return;
+      dragPos = p;
+      drawRows();          // 让被拖的那行带上 .dragging
+      e.preventDefault();  // 别顺手选中文字
+      dragMove = function (ev) {
+        if (dragPos < 0) return;
+        var to = posFromY(list, ev.clientY);
+        if (to < 0 || to === dragPos) return;
+        CARD_ORDER = orderMove(CARD_ORDER, dragPos, to);
+        dragPos = to;
+        drawRows();
+      };
+      dragUp = function () { endDrag(); };
+      document.addEventListener("mousemove", dragMove);
+      document.addEventListener("mouseup", dragUp);
+    });
+
+    // v10.1: 阈值输入 —— 数值来自 jsx 下发的默认值/上次生效值
+    function drawTh() {
+      var el = $("setTh");
+      if (!el) return;
+      var h = "", i, j;
+      for (i = 0; i < TH_FIELDS.length; i++) {
+        h += '<label class="th-row"><span class="th-name">' + esc(TH_FIELDS[i].label) + "</span>" +
+          '<input type="number" class="th-in" id="th_' + TH_FIELDS[i].k + '"' +
+          ' step="' + TH_FIELDS[i].step + '" min="0">' +
+          // v10.1: 单位列**无条件**生成(空就空着) —— 否则没单位的两行少一个节点,
+          //   在 flex space-between 下输入框会被推到更靠右, 7 行左边界就不齐了。
+          '<span class="th-unit">' + (TH_FIELDS[i].unit || "") + "</span>" +
+          "</label>";
+      }
+      el.innerHTML = h;
+      for (j = 0; j < TH_FIELDS.length; j++) {
+        (function (k) {
+          var inp = $("th_" + k);
+          if (!inp) return;
+          inp.onchange = function () { onThChange(k, inp); };
+        })(TH_FIELDS[j].k);
+      }
+    }
+
+    drawRows();
+    drawTh();
+    fillDraftInputs();
+
+    var gear = $("btnSet");
+    if (gear) gear.addEventListener("click", function () {
+      mask.classList.remove("hidden");
+      thDraftInit();                    // 以"当前生效值"起稿
+      drawRows(); drawTh(); fillDraftInputs();
+      // v10.1: 默认值要到 jsx 才拿得全, 改成**第一次打开弹层**才问 ——
+      //   面板一打开就自动扫描, 那次 res.th 已经把阈值带回来了, 所以正常路径下这里同步返回,
+      //   不再多跑一次 jsx 解析(初版放在启动时, 会和自动扫描各 evalFile 一遍)。
+      thEnsure(function () {
+        if (!TH_DEF) return;
+        thDraftInit(); drawTh(); fillDraftInputs();
+      });
+    });
+    // v10.1: 「确认」= 草稿落盘并关闭(阈值不会边打边存)
+    var okSet = $("setOk");
+    if (okSet) okSet.addEventListener("click", function () {
+      thDraftCommit();
+      closeSet();
+      showNotice("设置已保存，点「开始检查」生效。");
+    });
+    // v10.2: 「重置默认」点下**直接重置**(雪糕要求去掉确认弹窗) ——
+    //   重置后仍停在设置弹层里, 开关/顺序/阈值一眼看得见全回到默认, 所以不需要再问一句。
+    var rstSet = $("setReset");
+    if (rstSet) rstSet.addEventListener("click", function () {
+      thResetAll();
+      drawRows(); drawTh(); fillDraftInputs();
+      showNotice("已恢复默认设置，点「开始检查」生效。");
+    });
+    var clo = $("setClose");
+    if (clo) clo.addEventListener("click", closeSet);
+    mask.addEventListener("click", function (e) { if (e.target === mask) closeSet(); });
+    // v10.2: 重置不再弹确认框 ⇒ 去掉原先"ESC 先让位给确认框"那层判断(设置弹层里不会再压别的弹层)
+    document.addEventListener("keydown", function (e) {
+      if (e.keyCode === 27 && !mask.classList.contains("hidden")) closeSet();
+    });
+  }
+
   // ---------- 主流程 ----------
   // v8.0: keepNotice —— 操作后(转曲/嵌入)触发的刷新必须**保留**本次成功提示。
   //   旧版 showNotice() 之后立刻 run(),而 run() 第一件事就是清 #notice ⇒ 操作反馈一闪即没。
@@ -211,10 +568,12 @@
       $("btnRun").disabled = false;
       // v8.1: 措辞改为"仍在继续" —— ExtendScript 无多线程,JSX 一旦开跑就停不下来;
       //   旧版在此宣告超时、回调又 `if (timedOut) return` 把已算完的结果丢掉 ⇒ 白转一场。
-      showError("扫描时间较长(超过 20 秒)。文档对象可能较多，后台仍在继续，完成后会自动显示结果。");
-    }, 20000);
+      showError("扫描时间较长(超过 " + (BUSY_TIMEOUT_MS / 1000) + " 秒)。文档对象可能较多，后台仍在继续，完成后会自动显示结果。");
+    }, BUSY_TIMEOUT_MS);
 
-    execJsx("runPreflight();", function (data, raw) {
+    SCAN_CK = CARD_CK.slice(0); // v10.0: 记录本轮扫描用的开关快照(渲染占位卡按它判)
+    // v10.1: 第 8 参 = 阈值串(空串则由 jsx 用 PF_TH_DEF 默认值)
+    execJsx("runPreflight(" + ckArgs() + "," + thArg() + ");", function (data, raw) {
       // v8.1: 不再因超时丢弃迟到的结果 —— 照常渲染,并补一条"耗时较长"提示
       scanBusy = false;   // v8.6: 必须先解锁再分支 —— 下面有提前 return,漏了就锁死面板
       clearTimeout(timer);
@@ -260,6 +619,9 @@
   // ---------- 渲染 ----------
   function render(d) {
     lastDocKey = docKey(d); // v5.6: 记录文档指纹,供焦点切换比对
+    // v10.1: 阈值随结果一起回传(jsx 的 PF_TH_DEF 是唯一真源) —— 面板只显示, 不保存默认值。
+    //   d.th 缺失(极旧的 jsx 缓存)时沿用上次生效值; 都没有则显示 "?" 而不是猜一个数字。
+    if (d && d.th) { PF_TH = d.th; if (!TH_DEF) TH_DEF = d.th; }
     // v3.9: 文件名/路径/构建号统一放底部 footer(原顶部信息条已移除)
     var foot = $("foot");
     // v7.2: 去掉常显的"JS构建 <戳>"——平时只是调试信息(版本号顶栏 <span class="ver"> 已可见;
@@ -270,10 +632,12 @@
       // v4.8: 符号内部扫描提示(仅当文档含符号时)
       (d.symbols && d.symbols.count > 0
         ? '<span class="fbuild">符号 ' + d.symbols.count + " 个" +
-          (d.symbols.truncated ? "(仅扫描前 3000 个)"
+          (d.symbols.truncated ? "(仅扫描前 " + thv("scan") + " 个)"
             : (d.symbols.scanned ? "(已扫描内部内容)" : "(内部不可访问)")) + "</span>" : "");
 
-    var html = "";
+    var cards = [];   // v10.1: 七张卡先各存一格, 最后按 CARD_ORDER 拼接(见函数末尾)
+    // v10.0: 按"本轮扫描用的开关快照"判定占位卡(扫描后又改勾选不会拿旧数据当新结果显示)
+    var scanCk = SCAN_CK || CARD_CK;
 
     // ===== 1. 画板 · 出血 · 色彩(v4.0: 色彩模式并入,原第2项移除) =====
     var cmOk = d.colorMode === "CMYK";
@@ -307,10 +671,10 @@
       }
       if (badAbs.length) {
         bleedLevel = "warn";
-        bleedHtml = '<div>出血不足 3mm 的画板 <b class="warn-t">' + badAbs.length + "</b> 个:</div>" +
+        bleedHtml = '<div>出血不足 ' + thv("bleed") + 'mm 的画板 <b class="warn-t">' + badAbs.length + "</b> 个:</div>" +
           '<ul class="list">' + badAbs.join("") + "</ul>";
       } else {
-        bleedHtml = '出血全部 ≥ 3mm，<b class="good">达标</b>。';
+        bleedHtml = '出血全部 ≥ ' + thv("bleed") + 'mm，<b class="good">达标</b>。';
       }
     } else {
       bleedHtml = '<span class="dim">无法测量</span>';
@@ -326,9 +690,11 @@
     // v5.0: 出血不足时右上角追加"出血不足"徽标(黄底),与色彩徽标并列
     var bleedChip = (bleedLevel === "warn" && badAbs.length > 0)
       ? chip("warn", "出血不足") : "";
-    html += card("画板 · 出血 · 色彩", c1Level, cmOk ? "CMYK" : "RGB",
-      '<table class="kv">' + abRows + "</table>" + bleedHtml + cmHtml,
-      cmOk ? "ok" : "bad", bleedChip);
+    cards[0] = scanCk[0]
+      ? card("画板 · 出血 · 色彩", c1Level, cmOk ? "CMYK" : "RGB",
+          '<table class="kv">' + abRows + "</table>" + bleedHtml + cmHtml,
+          cmOk ? "ok" : "bad", bleedChip)
+      : offCard("画板 · 出血 · 色彩");
 
     // ===== 2. 隐藏对象 =====
     var hd = d.hidden || { layerCount: 0, itemCount: 0, layerNames: [], truncated: false };
@@ -339,7 +705,7 @@
       // v7.1: 去掉冗余的"未发现"——卡片标题已表明检查项,正文直说状态
       hdHtml = '无 <b class="white">隐藏图层 / 隐藏对象</b>。';
     } else {
-      var hdHint = (hd.layerNames && hd.layerCount > hd.layerNames.length) ? "仅列出前 5 个" : "";
+      var hdHint = (hd.layerNames && hd.layerCount > hd.layerNames.length) ? "仅列出前 " + thv("cap") + " 个" : "";
       // v7.1: 去掉冗余的"发现"
       hdHtml = rowHead('隐藏图层 <b class="warn-t">' + (hd.layerCount || 0) + "</b> 个 · 隐藏对象 <b class='warn-t'>" +
         (hd.itemCount || 0) + "</b> 个。", hdHint);
@@ -348,10 +714,11 @@
       }
       // v5.18: "隐藏内容不会出现在导出结果中…"提示灰字按用户要求移除
       // v7.1: 配额提示去掉"对象过多,"前缀(与"仅扫描前 N"语义重复)
-      if (hd.truncated) hdHtml += '<div class="dim">(仅扫描前 3000 个)</div>';
+      if (hd.truncated) hdHtml += '<div class="dim">(仅扫描前 ' + thv("scan") + ' 个)</div>';
     }
     // v5.20: 有隐藏内容时徽标转红(左边条维持黄色,仅徽标级别改 bad)
-    html += card("隐藏对象", hdLevel, hdTotal > 0 ? hdTotal + " 个" : "无", hdHtml, hdTotal > 0 ? "bad" : "ok");
+    cards[1] = scanCk[1] ? card("隐藏图层 · 对象", hdLevel, hdTotal > 0 ? hdTotal + " 个" : "无", hdHtml, hdTotal > 0 ? "bad" : "ok")
+      : offCard("隐藏图层 · 对象");
 
     // ===== 3. 字体转曲 =====
     // v5.14: 转曲状态与缺失字体是两个独立状态,徽标并列显示(修 bug: 原三目
@@ -391,7 +758,7 @@
       }
       if (hasMissing) parts += renderMissingFonts(missingFonts);
       fHtml = parts;
-      if (d.fonts.truncated) fHtml += '<div class="dim">(仅扫描前 3000 个)</div>';
+      if (d.fonts.truncated) fHtml += '<div class="dim">(仅扫描前 ' + thv("scan") + ' 个)</div>';
     }
     // v8.8: 混合字体帧提示 —— 这类帧(一帧里多种字体、或字体名读不出)整帧无法判缺，
     //   旧实现一声不响。这是漏报面最大的一类，至少让用户知道有多少帧没被检查。
@@ -400,27 +767,20 @@
       '</b> 个文本框含多种字体(或字体名读不出)，未参与缺失字体检测。</div>';
 
     // v5.15: 极小字号,并入字体卡底部
-    // v6.8: 分两级——<6pt 计数黄、其中 <5pt 计数红;徽标"有 <5pt 才红,否则黄"
-    // v6.9: 有 <5pt 时总数数字一并转红(与徽标同级别);样本截断提示按用户要求删除
+    // v10.2: 合并为一档 —— 只有"小于阈值"这一条判定, 且直接标红(原先 <6 黄 / <5 红两级)。
+    //   ⇒ 掉 badCount 与"其中 N 处小于 5pt"那一行; 徽标也从"有 <5pt 才红"变成一律红。
     var tiny = (d.tiny && d.tiny.count > 0) ? d.tiny : null;
     if (tiny) {
-      var tinyBad = tiny.badCount || 0;
       // v5.17: 去掉小标题与建议灰字,只留计数与样本
       // v7.0: 截断提示回到标题行右侧(同一行、右对齐、不带括号)
-      var tinyHint = (tiny.count > tiny.samples.length) ? "仅列出前 5 处" : "";
+      var tinyHint = (tiny.count > tiny.samples.length) ? "仅列出前 " + thv("cap") + " 处" : "";
       // v7.1: 去掉冗余的"发现"与"的文字"
-      fHtml += rowHead('<b class="' + (tinyBad > 0 ? "bad-t" : "warn-t") + '">' + tiny.count + "</b> 处字号小于 6pt:", tinyHint) +
+      fHtml += rowHead('<b class="bad-t">' + tiny.count + "</b> 处字号小于 " + thv("tiny") + "pt:", tinyHint) +
         '<ul class="list">' + tiny.samples.map(function (s) {
           return '<li class="trunc" title="' + esc(s.t) + '">' + esc(s.t) + " — " + s.pt + "pt</li>";
         }).join("") + "</ul>";
-      // v6.8: <5pt 重度——补一行红字计数(嵌套在 <6pt 之内,不重复列样本)
-      if (tinyBad > 0) {
-        fHtml += '其中 <b class="bad-t">' + tinyBad + "</b> 处小于 5pt。";
-        tinyChip = chip("bad", "小字号 " + tiny.count);
-        fLevel = "bad";
-      } else {
-        tinyChip = chip("warn", "小字号 " + tiny.count);
-      }
+      tinyChip = chip("bad", "小字号 " + tiny.count);
+      fLevel = "bad";
     }
     // v5.21: 隐藏文字统计(树遍历只扫可见,隐藏的单独列出;字体名已并入缺失检测)
     // v5.22: 文案理顺——隐藏文字必然未转曲(转曲了就不是文本框),直接说明
@@ -451,7 +811,8 @@
         '<button class="btn-action" id="btnOutline">一键转曲</button>' +
         '</div>';
     }
-    html += card("字体转曲", fLevel, fChip, fHtml, fChipLevel, missChip + tinyChip);
+    cards[2] = scanCk[2] ? card("字体 · 转曲", fLevel, fChip, fHtml, fChipLevel, missChip + tinyChip)
+      : offCard("字体 · 转曲");
 
     // ===== 4. 图片嵌入 =====
     // v5.15: 缺失链接——源文件不存在的链接图计数、清单标红、徽标转"缺失 N 张"
@@ -462,7 +823,7 @@
       (missN ? " · 缺失链接: <b class='bad-t'>" + missN + "</b> 张" : "");
     if (d.images.linked.length) {
       // v7.0: 截断提示与小标题同一行、右对齐
-      var iHint = (d.images.linkedCount > d.images.linked.length) ? "仅列出前 5 张" : "";
+      var iHint = (d.images.linkedCount > d.images.linked.length) ? "仅列出前 " + thv("cap") + " 张" : "";
       // v7.1: 小标题去掉与"链接图片"重复的括注(上方汇总行已有"链接图片: N 张")
       iHtml += rowHead('<span class="section-sub">未嵌入:</span>', iHint);
       // v5.0: 链接文件名(name/file 路径)可能超长或 URL 编码,解码+单行截断
@@ -474,13 +835,14 @@
           esc(truncName(fn, 40)) + (it.missing ? ' <span class="bad-t">源文件不存在</span>' : "") + "</li>";
       }).join("") + "</ul>";
       // v6.9: 样本截断提示按用户要求删除(truncated 仍代表扫描配额上限,提示保留)
-      if (d.images.truncated) iHtml += '<div class="dim">(仅扫描前 3000 张)</div>';
+      if (d.images.truncated) iHtml += '<div class="dim">(仅扫描前 ' + thv("scan") + ' 张)</div>';
     }
     // 一键嵌入按钮
     if (d.images.linkedCount > 0) {
       iHtml += '<div class="action-row"><button class="btn-action" id="btnEmbed">一键嵌入</button></div>';
     }
-    html += card("图片嵌入", iLevel, missN > 0 ? ("缺失 " + missN + " 张") : (d.images.linkedCount > 0 ? "有链接图" : "全部嵌入"), iHtml);
+    cards[3] = scanCk[3] ? card("图片嵌入", iLevel, missN > 0 ? ("缺失 " + missN + " 张") : (d.images.linkedCount > 0 ? "有链接图" : "全部嵌入"), iHtml)
+      : offCard("图片嵌入");
 
     // ===== 5. 图片分辨率 =====
     var rs = d.resolution || { total: 0, lowCount: 0, okCount: 0, samples: [], truncated: false };
@@ -490,8 +852,8 @@
       rsHtml = '文档<span class="dim">无位图</span>。';
     } else {
       // v7.0: 截断提示与汇总行同一行、右对齐
-      var rsHint = (rs.lowCount > rs.samples.length) ? "仅列出前 5 张" : "";
-      rsHtml = rowHead("共 <b>" + rs.total + "</b> 张图片 · 达标 <b class='good'>" + rs.okCount + "</b> 张 · <300ppi <b class='" +
+      var rsHint = (rs.lowCount > rs.samples.length) ? "仅列出前 " + thv("cap") + " 张" : "";
+      rsHtml = rowHead("共 <b>" + rs.total + "</b> 张图片 · 达标 <b class='good'>" + rs.okCount + "</b> 张 · <" + thv("reso") + "ppi <b class='" +
         (rs.lowCount ? "warn-t" : "") + "'>" + rs.lowCount + "</b> 张", rsHint);
       if (rs.samples.length) {
         // v5.0: 文件名先 URL 解码再截断显示;完整名放 title(悬停可查)
@@ -506,10 +868,11 @@
         }).join("") + "</ul>";
       }
       // v6.9: 样本截断提示按用户要求删除
-      if (rs.truncated) rsHtml += '<div class="dim">(仅扫描前 3000 张)</div>';
+      if (rs.truncated) rsHtml += '<div class="dim">(仅扫描前 ' + thv("scan") + ' 张)</div>';
       // v5.18: "低于 300ppi…建议更换高清图源"提示灰字按用户要求移除
     }
-    html += card("图片分辨率", rsLevel, rs.lowCount > 0 ? "有 " + rs.lowCount + " 张偏低" : "全部达标", rsHtml);
+    cards[4] = scanCk[4] ? card("图片分辨率", rsLevel, rs.lowCount > 0 ? "有 " + rs.lowCount + " 张偏低" : "全部达标", rsHtml)
+      : offCard("图片分辨率");
 
     // ===== 6. 油墨 · 描边粗细 (v6.2: 方案 B —— 按"问题类型"分块,标题统一) =====
     var bt = d.black.text, bp = d.black.path;
@@ -528,7 +891,7 @@
     // v6.3: CMYK 四色分量左对齐——C/M/Y/K 各列补齐到 4 字符(最多 3 位数),
     //   填充用不换行空格 U+00A0(HTML 会把连续普通空格折叠成一个,补不齐)
     var NBSP = "\u00A0";
-    var LIGHT_CH = 5;   // 与 jsx 的 LIGHT_CH 同口径:某分量 0<值<5 判为色版过浅
+    var LIGHT_CH = thv("light");   // v10.1: 与 jsx PF_TH_DEF.light 同口径(前端不再写死该阈值)
     function padInkDesc(desc) {
       var m = /^C(\d+) M(\d+) Y(\d+) K(\d+)$/.exec(String(desc == null ? "" : desc));
       if (!m) return desc;   // 非标准四色(Gray 的 "K50" / RGB / 专色)原样不动
@@ -635,14 +998,14 @@
     var blocks = "";
     // 块 1: 油墨总量>300(红) —— 文字 + 图形样本合并成一张表,按来源标 [文字]/[图形]
     if (totalBad > 0) {
-      var badRows = inkMerge(bt.badSamples, bp.badSamples, 5); // v6.7: 合并后统一截到前 5 条
-      blocks += inkBlock("油墨总量>300", totalBad, "bad", totalBad > badRows.shown ? "仅列出前 5 处" : "");
+      var badRows = inkMerge(bt.badSamples, bp.badSamples, thv("cap")); // v6.7/v10.1: 合并后统一截到前 cap 条
+      blocks += inkBlock("油墨总量>" + thv("inkWarn"), totalBad, "bad", totalBad > badRows.shown ? "仅列出前 " + thv("cap") + " 处" : "");
       blocks += badRows.html;
     }
     // 块 2: 油墨总量 220~300(黄)
     if (totalWarn > 0) {
-      var warnRows = inkMerge(bt.warnSamples, bp.warnSamples, 5); // v6.7: 合并后统一截到前 5 条
-      blocks += inkBlock("油墨总量220~300", totalWarn, "warn", totalWarn > warnRows.shown ? "仅列出前 5 处" : "");
+      var warnRows = inkMerge(bt.warnSamples, bp.warnSamples, thv("cap")); // v6.7/v10.1: 合并后统一截到前 cap 条
+      blocks += inkBlock("油墨总量" + thv("inkOk") + "~" + thv("inkWarn"), totalWarn, "warn", totalWarn > warnRows.shown ? "仅列出前 " + thv("cap") + " 处" : "");
       blocks += warnRows.html;
     }
     // 块 3: 色版 1~4%(黄,CMYK 某分量) —— 用户指定排在描边块之前
@@ -650,15 +1013,15 @@
       var lightRows = (light.samples || []).map(function (s) {
         return { l: s.src === "text" ? "文字" : "图形", s: s, markLight: true };  // v7.6: 过浅分量标白
       });
-      var lightOut = inkRows(lightRows, 5);   // v7.7: 相同色值合并为 " ×n"
-      blocks += inkBlock("色版1~4%", lightN, "warn", lightN > lightOut.shown ? "仅列出前 5 处" : "");
+      var lightOut = inkRows(lightRows, thv("cap"));   // v7.7/v10.1: 相同色值合并为 " ×n"
+      blocks += inkBlock("色版1~" + (isFinite(LIGHT_CH) ? LIGHT_CH - 1 : "?") + "%", lightN, "warn", lightN > lightOut.shown ? "仅列出前 " + thv("cap") + " 处" : "");
       blocks += lightOut.html;
     }
     // v9.4: 原"块 4 叠印"已拆成独立卡片(见下方"7. 叠印"), 卡片顺序保持"油墨 -> 叠印"。
     // 块 4: 描边<0.1mm(黄,仅图形) —— 相同宽度合并为 "描边 0.09mm ×3"
     // v7.8: jsx 已按 mm 去重并带 n(全量次数);这里仍按 mm 分组(旧 jsx 兜底),计数优先取 s.n
     if (thinN > 0) {
-      blocks += inkBlock("描边<0.1mm", thinN, "warn", thinN > bp.thinSamples.length ? "仅列出前 5 处" : "");
+      blocks += inkBlock("描边<" + thv("thin") + "mm", thinN, "warn", thinN > bp.thinSamples.length ? "仅列出前 " + thv("cap") + " 处" : "");
       var tOrder = [], tMap = {};
       (bp.thinSamples || []).forEach(function (s) {
         var k = String(s.mm);
@@ -684,7 +1047,7 @@
     if (spotN) rest += " · 专色 <b>" + spotN + "</b>";
     if (mixedN) rest += " · 混合色 <b>" + mixedN + "</b>";
     if (otherN) rest += " · 渐变/图案 <b>" + otherN + "</b>";
-    if (bp.truncated) rest += " · 仅扫描前 3000 个";
+    if (bp.truncated) rest += " · 仅扫描前 " + thv("scan") + " 个";
     blocks += '<div class="ink-rest">' + rest + "</div>";
     bHtml = blocks;
 
@@ -693,7 +1056,7 @@
     if (totalBad > 0) { bLevel = "bad"; bChip = "超标 " + totalBad + " 处"; }
     else if (totalWarnAll > 0) { bLevel = "warn"; bChip = "注意 " + totalWarnAll + " 处"; }
     // v9.4: 叠印已独立成卡(下一张),这里不再挂 extraChip,标题也去掉"叠印"二字
-    html += card("油墨 · 描边粗细", bLevel, bChip, bHtml);
+    cards[5] = scanCk[5] ? card("油墨 · 描边粗细", bLevel, bChip, bHtml) : offCard("油墨 · 描边粗细");
 
     // ===== 7. 叠印 (v9.4: 依雪糕要求从油墨卡拆出, 独立成卡) =====
     //   ⚠ 旧 jsx(缓存里没有 white/text/path 键)一律 ||0 —— 让 undefined 参与算术会得 NaN、
@@ -708,14 +1071,14 @@
       var oRows = (ovp.samples || []).map(function (s) {
         return { l: s.src === "text" ? "文字" : "图形", s: s };
       });
-      var oOut = inkRows(oRows, 5);
+      var oOut = inkRows(oRows, thv("cap"));
       // v9.7: 叠印汇总 —— 锁定 / 白色一并进标题行(原先各占一行: 一行灰字 + 一行正文),
       //   两段解释改挂 title 悬停提示 ⇒ 卡片净省 2 行, 且数字集中在一处更好对账。
       oHtml += rowHead("共 <b class='bad-t'>" + ovpN + "</b> 处叠印" +
         ((ovpTx || ovpPth) ? " · 文字 <b>" + ovpTx + "</b> · 图形 <b>" + ovpPth + "</b>" : "") +
         (ovpLocked > 0 ? ' · <span title="清除叠印时锁定对象默认跳过；勾选「解锁全部」可一并清除">锁定 <b class="warn-t">' + ovpLocked + "</b></span>" : "") +
         (ovpW > 0 ? ' · <span title="白色叠印后不再遮挡下层，印出来会花">白色 <b class="bad-t">' + ovpW + "</b></span>" : ""),
-        ovpN > oOut.shown ? "仅列出前 5 处" : "");
+        ovpN > oOut.shown ? "仅列出前 " + thv("cap") + " 处" : "");
       oHtml += oOut.html;
       // v9.7: 「其中白色叠印 N 处(…印出来会花)。」整行删除 —— 白色已并入上方标题行,
       //   危害说明移入该段的 title, 不再占用卡片高度。
@@ -737,9 +1100,15 @@
     oHtml += '<div class="dim">隐藏对象与图层不参与叠印检查。</div>';
     // 副徽标(第 6 参): 只有真出现白色叠印才挂,文案带数量便于一眼定量
     //   v9.7: 原先那行「其中白色叠印 N 处(…印出来会花)」已删除, 危害说明改挂 title
-    html += card("叠印", oLevel, oChip, oHtml, null,
-      ovpW > 0 ? '<span class="chip bad" title="白色叠印后不再遮挡下层，印出来会花">白叠印 ' + ovpW + " 处</span>" : "");
+    cards[6] = scanCk[6]
+      ? card("叠印", oLevel, oChip, oHtml, null,
+          ovpW > 0 ? '<span class="chip bad" title="白色叠印后不再遮挡下层，印出来会花">白叠印 ' + ovpW + " 处</span>" : "")
+      : offCard("叠印");
 
+    // v10.1: 按 CARD_ORDER 拼接 —— 卡片上下顺序可在「设置」里拖动调整。
+    //   ⚠ 只影响渲染顺序; 传给 jsx 的七卡开关仍按固定卡序(ckArgs()), 否则 c1..c7 会错位。
+    var html = "", _oi;
+    for (_oi = 0; _oi < CARD_ORDER.length; _oi++) html += (cards[CARD_ORDER[_oi]] || "");
     $("results").innerHTML = html;
 
     // 复选框状态回填 + 变更保存(面板重绘后保持用户选择)
@@ -785,7 +1154,7 @@
     //   (ExtendScript 无多线程,停不下来),回调到达时清掉计时器。
     var actTimer = setTimeout(function () {
       showNotice("操作耗时较长，后台仍在继续，完成后会自动刷新结果。");
-    }, 20000);
+    }, BUSY_TIMEOUT_MS);
     execJsx(jsxFns, function (data, raw) {
       clearTimeout(actTimer);
       actionBusy = false;
@@ -916,6 +1285,7 @@
   document.addEventListener("DOMContentLoaded", function () {
     // v8.0: 必须包一层 —— 若直接把 run 当监听器,浏览器会把 click 事件对象传进第 1 参(keepNotice),
     //       事件对象恒为真 ⇒ 手动点"开始检查"也会保留旧提示(不再是"清残留"语义)
+    initSettings(); // v10.0: 设置弹层(七卡开关)按真实卡序生成
     $("btnRun").addEventListener("click", function () { run(); });
     if (inCEP()) run(); // 打开面板自动检查一次
     // v5.6/体验①: 面板获得焦点时探测当前文档指纹,与上次结果不一致(切换了文档)则自动重扫

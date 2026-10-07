@@ -15,6 +15,11 @@ body {
   user-select: text;
 }
 
+/* v10.3: 按钮 / 输入框补字体族继承。
+   <button> 与 <input> 在浏览器里**默认不继承 font-family** —— 只写 font-size 的按钮会落到
+   UA 默认的 Arial, 而面板其余文字是微软雅黑(实测 computed: .btn/.btn-action/.modal-btn/.th-in 均为 Arial)。 */
+button, input { font-family: inherit; }
+
 /* 深色滚动条 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-track { background: #151517; }
@@ -35,7 +40,8 @@ body {
 }
 .title { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 5px; }
 .title svg { flex: none; }
-.ver { font-size: 10px; color: #888; font-weight: 400; margin-left: 2px; }
+/* v10.3: 10 -> 11px(全站最小档取消, 10px 只剩页脚一处) */
+.ver { font-size: 11px; color: #888; font-weight: 400; margin-left: 2px; }
 
 .btn {
   background: #0e639c;
@@ -59,6 +65,10 @@ body {
   border-radius: 999px; /* v9.0: 方案 C —— 三族按钮统一胶囊 */
   padding: 10px 20px;
   font-size: 14px;
+  /* v10.3: 显式锁死行高。卡体行盒由 1.7 改成固定 20px 后, 这里若不写就会从原先的
+     23.8px(14 × 1.7)掉到 20px, 卡内操作按钮会矮 3.8px。取 24px 既保住原高度(±0.2px)
+     又并入 24px 节奏。 */
+  line-height: 24px;
   font-weight: 600;
   cursor: pointer;
   width: 100%;
@@ -146,7 +156,8 @@ label.chk input[type="checkbox"] {
 }
 .modal-title {
   color: #e6e6e6;
-  font-size: 16px;
+  /* v10.3: 16 -> 15px, 与弹层正文/按钮同档(16px 是全站唯一一例) */
+  font-size: 15px;
   font-weight: 600;
   margin-bottom: 10px;
 }
@@ -175,8 +186,90 @@ label.chk input[type="checkbox"] {
 .modal-cancel:hover { background: #4a4a4a; }
 .modal-ok { background: #d33; color: #fff; }
 .modal-ok:hover { background: #e64444; }
+/* v10.1: 设置弹层的「重置默认」—— 中性灰, 不去抢「确认」的红色; 收窄内距好塞下三颗 */
+.modal-reset { background: #2c2c2e; color: #b8b8b8; padding: 10px 16px; }
+.modal-reset:hover { background: #3a3a3c; color: #e6e6e6; }
+/* 弹性空隙: 把「重置默认」顶到左边, 关闭/确认留在右边 */
+.set-gap { flex: 1 1 auto; }
 
-.results { padding: 10px 10px 4px; }
+/* v10.0: 顶栏右侧动作区(设置齿轮 + 开始检查),与按钮同高对齐 */
+.top-actions { display: inline-flex; align-items: center; gap: 8px; flex: none; }
+.btn-gear {
+  background: transparent;
+  color: #b8b8b8;
+  /* v10.1: 依雪糕要求去掉齿轮外侧圆线(保留 border-radius 供 hover 底色用) */
+  border: none;
+  border-radius: 999px;
+  width: 32px; height: 32px;
+  padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  cursor: pointer;
+}
+.btn-gear:hover { background: #2c2c2e; color: #e6e6e6; }
+
+/* v10.0: 设置弹层 —— 卡片开关勾选行 */
+/* v10.1: 设置项变多(7 卡开关 + 7 阈值 + 排序), 限高后可滚 */
+.set-modal { min-width: 320px; max-width: 368px; max-height: 78vh; overflow-y: auto; }
+.set-sub { color: #999; font-size: 12px; line-height: 1.6; margin-bottom: 12px; }
+.set-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; }
+/* v10.1: 行内左=勾选+名称, 右=拖动抓手(序号 ①②③ 已按雪糕要求去掉) */
+.set-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 5px 10px; border-radius: 6px;
+  color: #d8d8d8; font-size: 12px; /* v10.3: 13 -> 12px, 并入面板主档 */
+}
+.set-row:hover { background: #1f1f21; }
+.set-ck { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; flex: 1 1 auto; min-width: 0; }
+.set-row input[type="checkbox"] { width: 15px; height: 15px; accent-color: #d33; cursor: pointer; flex: none; }
+/* v10.1: ↑↓ 按钮换成拖动抓手 —— 抓手按住不放, 上下移动光标即可实时换位。
+   ⚠ 拖动中给整行加底色, 让"正在拖哪一行"一眼可见; 抓手自己 cursor: grab。 */
+.grip {
+  flex: none; width: 22px; height: 22px;
+  display: inline-flex; align-items: center; justify-content: center;
+  border-radius: 6px; cursor: grab; color: #8a8a8a; /* v10.3: 5 -> 6px 并入小圆角档 */
+}
+/* v10.2: 抓手改成雪糕给的形状 —— **2 行 × 4 列 = 8 个圆点**。
+   做法: 一颗 2.3px 的圆点用 radial-gradient 画, background-size 4px×4px 平铺 ⇒
+   16px 宽 = 4 列、8px 高 = 2 行。⚠ 用 currentColor 而不是写死灰色, 这样 .grip:hover
+   的 color 才真的作用到点上(旧写法把 #8a8a8a 写进了渐变里, hover 改色等于没改)。 */
+.grip::before {
+  content: ""; flex: none;
+  width: 16px; height: 8px;
+  background-image: radial-gradient(circle at 2px 2px, currentColor 1.15px, transparent 1.15px);
+  background-size: 4px 4px;
+  background-repeat: repeat;
+}
+.grip:hover { background: #2c2c2e; color: #d8d8d8; }
+.grip:active { cursor: grabbing; }
+.set-row.dragging { background: #2f2f31; box-shadow: inset 0 0 0 1px #4a4a4a; }
+.set-row.dragging .grip { cursor: grabbing; color: #e6e6e6; }
+
+/* v10.1: 阈值输入区 —— 单位列固定 26px 且**每行都生成**(空单位也给空 span),
+   这样 flex space-between 下输入框的左右边界 7 行完全对齐。 */
+.set-th { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; }
+.th-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 4px 10px; color: #d8d8d8; font-size: 12px; /* v10.3: 13 -> 12px, 并入面板主档 */
+}
+.th-name { flex: 1 1 auto; min-width: 0; }
+.th-in {
+  width: 74px; flex: none; text-align: right;
+  background: #1f1f21; color: #e6e6e6;
+  border: 1px solid #4a4a4a; border-radius: 6px; /* v10.3: 5 -> 6px 并入小圆角档 */
+  padding: 3px 6px; font-size: 12px;
+}
+.th-in:focus { border-color: #888; outline: none; }
+.th-unit { width: 26px; flex: none; color: #999; font-size: 11px; }
+.set-hint { color: #777; font-size: 11px; margin-bottom: 14px; }
+
+/* v10.0: 已关闭的占位卡 —— 整卡降透明度、标题转灰、徽标用中性灰 */
+.card.card-off { opacity: 0.55; }
+.card.card-off .card-head { color: #999; }
+.chip.off { background: #1b1b1c; color: #999; }
+
+/* v10.3: 左右 10 -> 12px。顶栏与页脚都是 12px, 只有卡片区是 10px ⇒ 卡片左右边缘
+   比顶栏按钮 / 页脚各多探出 2px(实测)。 */
+.results { padding: 12px 12px 4px; }
 
 .card {
   background: #1b1b1c;
@@ -196,23 +289,57 @@ label.chk input[type="checkbox"] {
   font-size: 12px;
 }
 .card-head .chips { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
-.card-body { padding: 8px 10px; line-height: 1.7; }
+/* v10.3: 卡头标题单行省略。徽标是 flex-shrink:0 不会换行, 窄面板下被挤折的是标题:
+   实测 260px 时卡① 卡头 37 -> 48px、卡③(3 个徽标) 37 -> 80px。
+   现在让标题让位、溢出打省略号, 卡头恒为一行。 */
+.card-head > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* v10.3: 行盒 1.7 -> 固定 20px。
+   ⚠ 1.7 是**单位数**, 会按各自字号换算: 12px 得 20.4px, 11px 只得 18.7px。
+   卡内 11px 的那几处(汇总行 .ink-rest / 截断提示 .row-h / 小标题 .section-sub / .dim)
+   于是长期比样本行(写死 19px)更挤; 而汇总行还是微软雅黑(字面 1.36em ⇒ 15px),
+   上下可见空隙只剩 1.85px。改固定 20px 后卡内未写行高的文字同盒;
+   ul.list li(19px) 与 table.kv td(18px) 是写死的, 24px 节奏不受影响。 */
+.card-body { padding: 8px 10px; line-height: 20px; }
+/* v10.3: 卡体首元素不再白吃 margin-top —— 卡⑥ 只渲染汇总行时, .ink-rest 的 8px
+   上边距没人抵消, 实测首行离卡头 16px, 而其它卡 8~10px。 */
+.card-body > :first-child { margin-top: 0; }
 
+/* v10.4: 描边统一收在这里 —— 用 transparent 而不是 none, 保住那 1px 边框盒,
+   徽标高与卡头高**零位移** (否则四颗各矮 2px, 卡头会从 37px 掉到 35px)。
+   四条状态规则由此只管底色与文字色。 */
 .chip {
   font-size: 11px;
   font-weight: 400;
   padding: 2px 10px;
+  border: 1px solid transparent;
   border-radius: 10px;
   white-space: nowrap;
 }
-/* v4.9 徽标配色(用户最终选定):
-   红/黄(风险/注意)保持 v4.8 之前的深底彩字柔和方案;
-   绿(正常)用灰底灰边绿字,与卡片头背景融合
-   v8.9: 依雪糕要求,绿徽标改为"只留描边、底色透明" —— 透明即自然透出卡片头底色,
-     比硬填一个色值更贴合(卡头/页面若再调色也自动跟随)。红/黄徽标配色不动。 */
-.chip.ok   { background: transparent; color: #4ec98a; border: 1px solid #555; }
-.chip.warn { background: #4a3a14; color: #e8b93e; border: 1px solid #6b5518; }
-.chip.bad  { background: #4a1d1a; color: #f06a55; border: 1px solid #6e2a22; }
+/* v4.9 徽标配色(用户最终选定): 红/黄走深底彩字柔和方案;
+   v8.9 曾依雪糕要求把绿徽标改成"只留描边、底色透明";
+   v10.4(雪糕 2026-10-07 定, 方案 A): 四种徽标一律**去掉描边、只留底色**。
+   v10.5(雪糕 2026-10-07 定): 绿徽标的底 #333 -> **#1b1b1c**, 即**卡体底**(.card 的 background)。
+     v10.4 的 #333 与卡头 #2c2c2e 只差 1.10:1, 视觉上"粘"在一起(雪糕反馈);
+     换成卡体底后, 徽标在卡头里读起来像"卡体透上来的一块",
+     与卡片里「色彩模式: CMYK」那一行**同底**。
+     ⚠ 是 #1b1b1c 而不是 #151517: 「色彩模式: CMYK」那一行是 .card-body 里的裸 div,
+       而 .card-body 的 computed background = rgba(0,0,0,0)(透明)
+       ⇒ 真正的底是它外层的 .card = #1b1b1c。
+       #151517 是 .card 再往外的**页面底**(body), 徽标永远不会直接落在它上面。
+       (无头 Chrome 真渲染实测: b.white / div / .card-body 三层全 transparent, .card = rgb(27,27,28))
+     对比度: 绿字 #4ec98a on #1b1b1c = 8.23:1 / 灰字 #999 on #1b1b1c = 6.04:1 (均过 AA 4.5);
+             徽标底 vs 卡头 #2c2c2e = 1.23:1 (v10.4 的 #333 只有 1.10:1)。
+   .chip.off 与 .chip.ok 在 v10.5 一并改成 #1b1b1c(v10.7 起只有 .chip.off 还是它)。
+   红/黄底色仍按 v4.9 不动(#4a3a14 / #4a1d1a) —— 它们是语义色, 不参与本次统一。
+     ⚠ 连带: tests 里 v10.4 那条"绿底 = #333"的断言已按本口径改写。
+   v10.7(雪糕 2026-10-07 定): 绿徽标的底 **#1b1b1c -> #333**(撤销 v10.5, 只撤绿这一枚)。
+     ⚠ 取舍如实记: #333 vs 卡头 #2c2c2e = 1.10:1, 比 #1b1b1c 的 1.23:1 更贴近卡头
+       —— v10.5 改深正是因为雪糕当时反馈 #333 与卡头"粘在一起"; 本轮他按视觉偏好改回。
+     绿字 #4ec98a on #333 = 6.04:1, 仍过 AA 4.5。
+     .chip.off(灰字) **未动**, 仍是 #1b1b1c —— ok/off 自此不再"同色同源"。 */
+.chip.ok   { background: #333; color: #4ec98a; }
+.chip.warn { background: #4a3a14; color: #e8b93e; }
+.chip.bad  { background: #4a1d1a; color: #f06a55; }
 
 table.kv { width: 100%; border-collapse: collapse; }
 /* v7.5: 去掉画板行的横向分割线(雪糕要求)。
@@ -238,6 +365,11 @@ table.kv td:first-child { color: #999; white-space: nowrap; width: 40%; }
 .white { color: #e6e6e6; }
 .warn-t { color: #e8b93e; }
 .bad-t { color: #f06a55; }
+/* v10.2 收尾: 补上这条 —— main.js 的「缺失链接」⚠ 用了 .warn-tri, 但 CSS 里从来没有它
+   (只在一处注释里被提到) ⇒ 那个 ⚠ 一直继承正文色、等于没做标记。
+   ⚠ 取红(#f06a55)而不是黄: 同一行紧邻的 <span class="bad-t">源文件不存在</span> 本来就是红,
+   一个「文件丢了」的告警分裂成「黄 ⚠ + 红字」反而像两个严重级。类名保留(改名要连 main.js 一起动)。 */
+.warn-tri { color: #f06a55; }
 
 ul.list { list-style: none; margin-top: 4px; }
 /* v7.3: 清单样本行去深灰底色块 + 文字统一灰 #bbb。
@@ -247,13 +379,15 @@ ul.list { list-style: none; margin-top: 4px; }
    ⚠ ul.list 为全站 6 张卡共用 —— 本改动同时作用于所有卡的清单,不只油墨卡。
    v7.4: 样本行左侧缩进 12px,让样本在视觉上"降一级"、归到其块标题之下。
    缩进用 padding-left(非 text-indent),这样每行整体右移、等宽字下 "=" 列对齐不受影响;
-   代价是内容区变窄约 3%,超长行会比 v7.3 更早出现省略号。 */
+   代价是内容区变窄约 3%,超长行会比 v7.3 更早出现省略号。
+   v10.3: 灰阶 #bbb -> #a8a8a8 —— 样本行亮度过高(8.97), 比其上的小标题(6.04)还抢眼,
+   与"明细应弱于结构标签"相反; 同时把 .section-sub 提到 #c5c5c5, 恢复正确次序。 */
 ul.list li {
   padding: 2px 0 2px 12px;
   background: transparent;
   border-radius: 0;
   margin-bottom: 1px;
-  color: #bbb;
+  color: #a8a8a8;
   word-break: break-all;
   font-family: Consolas, monospace;
   font-size: 11px;
@@ -274,14 +408,18 @@ ul.list li {
 }
 ul.list li .trunc { max-width: 100%; display: block; }
 
-.section-sub { color: #999; margin: 6px 0 2px; font-size: 11px; }
+/* v10.3: ① 色 #999 -> #c5c5c5 —— 原先小标题(6.04)比它下面的样本行 #bbb(8.97)还暗,
+   结构标签反而更弱, 层级是反的。
+   ② 外边距 6px/2px -> 8px/4px, 与卡内其它块间距并入 "0 / 4 / 8" 三档。 */
+.section-sub { color: #c5c5c5; margin: 8px 0 4px; font-size: 11px; }
 
 /* v6.2: 油墨卡按"问题类型"分块(方案 B)——块标题统一样式 */
 /* v6.4: 块标题改"数字染色"——标题文字取常规色(继承正文 #e6e6e6),只有计数 N 用
    .warn-t/.bad-t 上黄/红,与全站"只给数字上色"的规则一致。
    ⚠ 不要给块标题内的 b 元素设 color: 其特异性 (0,1,1) 会盖掉 .warn-t/.bad-t (0,1,0),
    数字会被染回标题色 —— v6.3 加的那条继承规则已按此删除。 */
-.ink-block { margin-top: 7px; font-size: 12px; font-weight: 600; display: flex; align-items: baseline; gap: 8px; }
+/* v10.3: 块标题上边距 7 -> 8px, 卡内块间距并入 "0 / 4 / 8" 三档。 */
+.ink-block { margin-top: 8px; font-size: 12px; font-weight: 600; display: flex; align-items: baseline; gap: 8px; }
 .ink-block:first-child { margin-top: 0; }
 /* 正常计数改灰——原白色(#e6e6e6)在深底上比红/黄更亮,视觉权重与严重度相反 */
 .ink-n { color: #999; }
@@ -299,12 +437,21 @@ ul.list li .trunc { max-width: 100%; display: block; }
 .foot {
   padding: 8px 12px 12px;
   color: #666;
-  font-size: 10px;
+  font-size: 11px; /* v10.3: 10 -> 11px。v10.6 起这一档只兜 .fbuild 了(.fname/.fpath 自带 12px) */
   line-height: 1.5;
   word-break: break-all;
 }
-.foot .fname { display: block; color: #e6e6e6; font-size: 11px; }
-.foot .fpath { display: block; color: #808080; margin-top: 2px; }
+/* v10.6(雪糕 2026-10-07): 底部「文件名称 / 路径」改成与卡内小字注记同格式 ——
+   对齐目标 = 卡体内的 .dim(如叠印卡底部「隐藏对象与图层不参与叠印检查。」那一行)。
+   实测(无头 Chrome 真渲染, 内联真实 style.css):
+     .dim        = 12px / #888  / 行盒 20px (20px 来自 .card-body, .dim 自己只声明了 color)
+     .fname 原为  = 11px / #e6e6e6 / 行盒 16.5px
+     .fpath 原为  = 11px / #808080 / 行盒 16.5px
+   ⇒ 三项全对齐: 字号 12px、色 #888、行盒 20px。
+   ⚠ 只动 .fname / .fpath; .fbuild(符号 N 个)仍是 11px / #555 —— 未点名, 故未动。
+   ⚠ 页脚在卡片区之下(body 滚动), 所以本次改动**不影响任何卡片的高度/版式**。 */
+.foot .fname { display: block; color: #888; font-size: 12px; line-height: 20px; }
+.foot .fpath { display: block; color: #888; font-size: 12px; line-height: 20px; margin-top: 2px; }
 .foot .fbuild { display: block; color: #555; margin-top: 2px; }
 
 .hidden { display: none; }
