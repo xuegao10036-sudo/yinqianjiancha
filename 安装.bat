@@ -54,6 +54,9 @@ if defined FAIL echo   3. If this file is blocked: right-click it, Properties,
 if defined FAIL echo      tick "Unblock" at the bottom, OK, then run again.
 if defined FAIL echo   4. Last resort: right-click, "Run as administrator".
 if defined FAIL echo ------------------------------------------------------------
+if not defined FAIL mshta "javascript:var s=new ActiveXObject('WScript.Shell');var m='Install OK!  5 files copied:\nmanifest.xml, style.css, main.js, preflight.jsx, index.html\n\nRestart Illustrator: Window > Extensions > the preflight panel.';s.Popup(m,10,'Install complete',64);close();"
+if defined FAIL mshta "javascript:var s=new ActiveXObject('WScript.Shell');s.Popup('Install FAILED. Details are in this console window: file copy error, or debug-mode registry error. See TROUBLESHOOTING above.',0,'Install failed',16);close();"
+
 echo.
 pause
 if defined FAIL exit /b 1
