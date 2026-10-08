@@ -185,7 +185,7 @@ CEP 9（CSXS 9），实际下限约为 AI 23——更早版本装上了也未必
 
 `安装.bat` 没装上时，手动三步：
 
-1. 把整个文件夹复制到 `%APPDATA%\Adobe\CEP\extensions\com.workbuddy.ai.preflight`（`%APPDATA%` 即 `C:\Users\<用户名>\AppData\Roaming`，粘进资源管理器地址栏可直接打开）
+1. 把整个文件夹复制到 `%APPDATA%\Adobe\CEP\extensions\yinqianjiancha`（`%APPDATA%` 即 `C:\Users\<用户名>\AppData\Roaming`，粘进资源管理器地址栏可直接打开）
 2. 重启 Illustrator，看 `窗口 → 扩展功能` 里有没有「印前检查-雪糕」。**有就到此为止**。
 3. 还是没有时，才需要打开未签名扩展的调试开关——在 **cmd 窗口**粘这一行，执行完再重启一次 Illustrator：
    ```

@@ -1,6 +1,8 @@
 @echo off
 setlocal
-set "DEST=%APPDATA%\Adobe\CEP\extensions\com.workbuddy.ai.preflight"
+rem Remove the pre-2026-10 folder name so old copies do not pile up
+if exist "%APPDATA%\Adobe\CEP\extensions\com.workbuddy.ai.preflight" rmdir /S /Q "%APPDATA%\Adobe\CEP\extensions\com.workbuddy.ai.preflight"
+set "DEST=%APPDATA%\Adobe\CEP\extensions\yinqianjiancha"
 set "FAIL="
 
 echo ============================================
