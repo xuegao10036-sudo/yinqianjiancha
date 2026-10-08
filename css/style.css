@@ -12,6 +12,10 @@ body {
   color: #e6e6e6;
   overflow-x: hidden;
   overflow-y: auto;
+  /* v10.11e: 恒定预留滚动条槽位 —— 点「开始检查」清空结果时页面变短、滚动条消失又回来,
+     视口宽度 10px 一伸一缩, sticky 顶栏(含按钮)跟着平移, 被感知为"按钮闪了一下"。
+     stable 让槽位始终占位, 视口宽度恒定, 顶栏不再回退。 */
+  scrollbar-gutter: stable;
   user-select: text;
 }
 
@@ -41,7 +45,7 @@ button, input { font-family: inherit; }
 .title { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 5px; }
 .title svg { flex: none; }
 /* v10.3: 10 -> 11px(全站最小档取消, 10px 只剩页脚一处) */
-.ver { font-size: 11px; color: #888; font-weight: 400; margin-left: 2px; }
+.ver { font-size: 11px; color: #8a8a8a; font-weight: 400; margin-left: 2px; }
 
 .btn {
   background: #0e639c;
@@ -100,7 +104,7 @@ label.chk {
 label.chk input[type="checkbox"] {
   width: 14px;
   height: 14px;
-  accent-color: #d33;
+  accent-color: #1a73e8; /* v10.11 后补: 红→蓝统一(AI 面板为默认蓝), 与设置行复选框一致 */
   cursor: pointer;
 }
 
@@ -210,7 +214,7 @@ label.chk input[type="checkbox"] {
 /* v10.0: 设置弹层 —— 卡片开关勾选行 */
 /* v10.1: 设置项变多(7 卡开关 + 7 阈值 + 排序), 限高后可滚 */
 .set-modal { min-width: 320px; max-width: 368px; max-height: 78vh; overflow-y: auto; }
-.set-sub { color: #999; font-size: 12px; line-height: 1.6; margin-bottom: 12px; }
+.set-sub { color: #8a8a8a; font-size: 12px; line-height: 1.6; margin-bottom: 12px; }
 .set-list { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; }
 /* v10.1: 行内左=勾选+名称, 右=拖动抓手(序号 ①②③ 已按雪糕要求去掉) */
 .set-row {
@@ -220,7 +224,7 @@ label.chk input[type="checkbox"] {
 }
 .set-row:hover { background: #1f1f21; }
 .set-ck { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; flex: 1 1 auto; min-width: 0; }
-.set-row input[type="checkbox"] { width: 15px; height: 15px; accent-color: #d33; cursor: pointer; flex: none; }
+.set-row input[type="checkbox"] { width: 15px; height: 15px; accent-color: #1a73e8; cursor: pointer; flex: none; } /* v10.11 后补: 红→蓝统一 */
 /* v10.1: ↑↓ 按钮换成拖动抓手 —— 抓手按住不放, 上下移动光标即可实时换位。
    ⚠ 拖动中给整行加底色, 让"正在拖哪一行"一眼可见; 抓手自己 cursor: grab。 */
 .grip {
@@ -259,8 +263,8 @@ label.chk input[type="checkbox"] {
   padding: 3px 6px; font-size: 12px;
 }
 .th-in:focus { border-color: #888; outline: none; }
-.th-unit { width: 26px; flex: none; color: #999; font-size: 11px; }
-.set-hint { color: #777; font-size: 11px; margin-bottom: 14px; }
+.th-unit { width: 26px; flex: none; color: #a8a8a8; font-size: 11px; }
+.set-hint { color: #8a8a8a; font-size: 11px; margin-bottom: 14px; }
 
 /* v10.0: 已关闭的占位卡 —— 整卡降透明度、标题转灰、徽标用中性灰 */
 .card.card-off { opacity: 0.55; }
@@ -355,10 +359,10 @@ table.kv td {
      反过来内边距 3px 或字号 12px 一动就破 24, 改前先按上面这条算术复算。 */
   line-height: 18px;
 }
-table.kv td:first-child { color: #999; white-space: nowrap; width: 40%; }
+table.kv td:first-child { color: #a8a8a8; white-space: nowrap; width: 40%; }
 
 .mono { font-family: Consolas, "Courier New", monospace; font-size: 11px; }
-.dim { color: #888; }
+.dim { color: #a8a8a8; } /* v10.11 后补: 字色两档归一——次要#a8a8a8/弱化#8a8a8a, 同句白灰跳变平缓 */
 /* v5.4: 正文达标/正常文案统一白色(原绿高亮);徽标/成功提示条仍保留绿色 */
 .good { color: #e6e6e6; }
 /* v5.3: 达标/正常文案用白色(不再绿高亮) */
@@ -422,21 +426,21 @@ ul.list li .trunc { max-width: 100%; display: block; }
 .ink-block { margin-top: 8px; font-size: 12px; font-weight: 600; display: flex; align-items: baseline; gap: 8px; }
 .ink-block:first-child { margin-top: 0; }
 /* 正常计数改灰——原白色(#e6e6e6)在深底上比红/黄更亮,视觉权重与严重度相反 */
-.ink-n { color: #999; }
+.ink-n { color: #a8a8a8; }
 /* v7.6: 色值串里"值 1~4"的过浅分量标白 —— 一眼看出是哪一个色版太浅。
    只改颜色,不加粗/不换字体,避免影响等宽定宽对齐。 */
 .ink-w { color: #ffffff; }
-.ink-rest { margin-top: 8px; color: #999; font-size: 11px; }
+.ink-rest { margin-top: 8px; color: #a8a8a8; font-size: 11px; }
 
 /* v7.0: 样本截断提示与所在标题行同一行、右对齐(不带括号;总数已在标题里)。
    .row-head 用于普通标题行;.ink-block 自身也是 flex,故 .row-t/.row-h 不嵌套选择器。 */
 .row-head { display: flex; align-items: baseline; gap: 8px; }
 .row-t { flex: 1 1 auto; min-width: 0; }
-.row-h { flex: 0 0 auto; margin-left: auto; color: #888; font-size: 11px; font-weight: 400; white-space: nowrap; }
+.row-h { flex: 0 0 auto; margin-left: auto; color: #8a8a8a; font-size: 11px; font-weight: 400; white-space: nowrap; }
 
 .foot {
   padding: 8px 12px 12px;
-  color: #666;
+  color: #8a8a8a;
   font-size: 11px; /* v10.3: 10 -> 11px。v10.6 起这一档只兜 .fbuild 了(.fname/.fpath 自带 12px) */
   line-height: 1.5;
   word-break: break-all;
@@ -450,8 +454,8 @@ ul.list li .trunc { max-width: 100%; display: block; }
    ⇒ 三项全对齐: 字号 12px、色 #888、行盒 20px。
    ⚠ 只动 .fname / .fpath; .fbuild(符号 N 个)仍是 11px / #555 —— 未点名, 故未动。
    ⚠ 页脚在卡片区之下(body 滚动), 所以本次改动**不影响任何卡片的高度/版式**。 */
-.foot .fname { display: block; color: #888; font-size: 12px; line-height: 20px; }
-.foot .fpath { display: block; color: #888; font-size: 12px; line-height: 20px; margin-top: 2px; }
-.foot .fbuild { display: block; color: #555; margin-top: 2px; }
+.foot .fname { display: block; color: #8a8a8a; font-size: 12px; line-height: 20px; }
+.foot .fpath { display: block; color: #8a8a8a; font-size: 12px; line-height: 20px; margin-top: 2px; }
+.foot .fbuild { display: block; color: #808080; margin-top: 2px; }
 
 .hidden { display: none; }
