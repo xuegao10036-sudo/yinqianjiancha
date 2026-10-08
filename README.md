@@ -1,6 +1,6 @@
 # 印前检查-雪糕
 
-当前版本 **v10.9** · 完整变更日志见 [更新日志.txt](更新日志.txt) · 许可 [MIT](LICENSE)
+当前版本 **v10.11** · 完整变更日志见 [更新日志.txt](更新日志.txt) · 许可 [MIT](LICENSE)
 
 在 Illustrator 里做印前自检的面板扩展：七张检查卡覆盖出血 / 隐藏内容 / 字体 / 图片 / 油墨 / 叠印，
 配**一键转曲**、**一键嵌入**、**一键清除叠印**三个动作按钮。
@@ -172,11 +172,11 @@ CEP 9（CSXS 9），实际下限约为 AI 23——更早版本装上了也未必
 扫描用 AI 自带的 ExtendScript，无需另装运行时。
 
 1. **关闭 Illustrator**
-2. **双击 `安装.bat`**
+2. **双击 `windows一键安装.bat`**
 3. **重启 Illustrator** → 菜单 `窗口 → 扩展功能 → 印前检查-雪糕`
 
-**以后要更新**：直接**再双击一次 `安装.bat`** 就行——它会直接覆盖面板文件
-（注册表开关是幂等的，重写没有副作用）。**卸载**双击 `卸载.bat`。两者改完都要重启 Illustrator。
+**以后要更新**：直接**再双击一次 `windows一键安装.bat`** 就行——它会直接覆盖面板文件
+（注册表开关是幂等的，重写没有副作用）。**卸载**双击 `windows一键卸载.bat`。两者改完都要重启 Illustrator。
 
 > 脚本已做幂等处理：目录只在不存在时创建，文件一律直接覆盖。所以「安装」和「更新」是同一个动作，
 > 不必区分「第一次装」还是「装过了要升级」。
@@ -199,7 +199,7 @@ CEP 9（CSXS 9），实际下限约为 AI 23——更早版本装上了也未必
 
 ### 手动安装
 
-`安装.bat` 没装上时，手动三步：
+`windows一键安装.bat` 没装上时，手动三步：
 
 1. 把整个文件夹复制到 `%APPDATA%\Adobe\CEP\extensions\yinqianjiancha`（`%APPDATA%` 即 `C:\Users\<用户名>\AppData\Roaming`，粘进资源管理器地址栏可直接打开）
 2. 重启 Illustrator，看 `窗口 → 扩展功能` 里有没有「印前检查-雪糕」。**有就到此为止**。
@@ -239,7 +239,7 @@ CEP 9（CSXS 9），实际下限约为 AI 23——更早版本装上了也未必
 
 **其它**
 
-- 本扩展**未签名**。`安装.bat` 会写入 `HKCU\Software\Adobe\CSXS.*\PlayerDebugMode`，  
+- 本扩展**未签名**。`windows一键安装.bat` 会写入 `HKCU\Software\Adobe\CSXS.*\PlayerDebugMode`，  
   这是 CEP 加载未签名扩展的**必要条件**，不是漏洞；不接受的话请不要安装。
 
 ## 目录结构
@@ -251,9 +251,9 @@ yinqianjiancha/
 ├─ js/main.js            面板前端逻辑（渲染 / 交互）
 ├─ jsx/preflight.jsx     宿主脚本（在 Illustrator 内运行扫描与一键操作）
 ├─ CSXS/manifest.xml     CEP 扩展清单
-├─ 安装.bat              安装 / 更新（覆盖面板文件，可重复执行）
+├─ windows一键安装.bat              安装 / 更新（覆盖面板文件，可重复执行）
 ├─ mac一键安装.command    macOS 安装 / 更新（同上，未经真机验证）
-├─ 卸载.bat              卸载
+├─ windows一键卸载.bat              卸载
 ├─ README.md             本文件
 ├─ 更新日志.txt          完整变更日志
 ├─ LICENSE               MIT 许可

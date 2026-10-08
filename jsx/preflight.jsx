@@ -104,7 +104,7 @@ function pfStringify(value) {
 // 不一致/不存在 → 强制重载一次。这样开发期改完 JSX 无需重启 AI。
 // v7.2: 仅随版本号递增(本版为面板文案一致化,检测逻辑与返回结构零改动)。
 // v10.1: 版本号 —— 面板/宿主同步递增
-var PF_BUILD = "10.9";
+var PF_BUILD = "10.11";
 
 // ============================================================
 // v10.1: 阈值唯一真源 —— 全部阈值集中在这张表, 前端不再保存任何阈值数字
@@ -278,8 +278,8 @@ function pfOvpInfo(c) {
                        (o.type === "rgb" && o.desc === "RGB(255,255,255)")));
   return { desc: desc, white: white };
 }
-// 兼容旧调用(只要色值说明)
-function pfOvpDesc(c) { return pfOvpInfo(c).desc; }
+// v10.11: 删除 pfOvpDesc —— "兼容旧调用(只要色值说明)"的一行包装, 全工程零引用
+// (pfOvpInfo 统一后旧调用点早已改完), 属遗留死代码; 已 grep 源码+测试确认为 0 引用。
 
 // v7.8: 采样池——同一个"值"只占 1 条,条数上限 cap;同值再出现时只累加它的 n。
 //   为什么:前端拿到 5 条原始样本后会把重复的合并成一行并加 " ×n",
@@ -771,13 +771,15 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
       //   (油墨/细描边/极浅各一次)、两个色句柄各读 2 次;同一个色对象一次读出 ink+light。
       var stk = false;
       try { stk = (pi.stroked === true); } catch (e0) {}
+      // v10.11: fc/sc 按需读取 —— 原先在入口无条件预读, ⑥关⑦开时白读(⑦只在叠印
+      //   命中时才需要色值);口径对齐文字侧 v10.0 的"命中才补读"(pfOvpAdd 读不到
+      //   会兜成不报, 与原行为一致)。
       var fc = null, sc = null;
-      try { fc = pi.fillColor; } catch (e1) {}
-      if (stk) { try { sc = pi.strokeColor; } catch (e2) {} }
       var rfc = null, rsc = null;
       if (CK.ik) { // v10.0: 卡⑥关 ⇒ 不读油墨/极浅
+        try { fc = pi.fillColor; } catch (e1) {}
         try { rfc = pfInkLightBoth(fc); } catch (e3) { rfc = null; }
-        try { if (stk) rsc = pfInkLightBoth(sc); } catch (e4) { rsc = null; }
+        try { if (stk) { sc = pi.strokeColor; rsc = pfInkLightBoth(sc); } } catch (e4) { rsc = null; }
         if (rfc) inkBucket(bp, rfc, nm, "填充");
         if (rsc) inkBucket(bp, rsc, nm, "描边");
       }
@@ -785,12 +787,16 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
       //   读不到 / 抛异常由 pfOvp* 兜成 false(宁可不报,绝不误报);色值只在命中时才读,摊薄成本。
       // v8.6: 复用上面已读出的 fc / sc, 不再回读 pi.fillColor / pi.strokeColor
       if (CK.ov) { // v10.0: 卡⑦关 ⇒ 不读叠印布尔
-        try { if (pfOvpFill(pi))   pfOvpAdd("path", "填充", fc, nm, pi); } catch (e8) {}
+        try {
+          if (pfOvpFill(pi)) {
+            if (!fc) { try { fc = pi.fillColor; } catch (e1b) {} } // v10.11: ⑥关时命中才补读
+            pfOvpAdd("path", "填充", fc, nm, pi);
+          }
+        } catch (e8) {}
         try {
           if (pfOvpStroke(pi)) {
-            var scO = sc;   // 未描边时 sc 为 null, 此时才补读一次
-            if (!scO) { try { scO = pi.strokeColor; } catch (eScO) {} }
-            pfOvpAdd("path", "描边", scO, nm, pi);
+            if (!sc) { try { sc = pi.strokeColor; } catch (e2b) {} } // v10.11: 原 scO 补读改为统一兜底
+            pfOvpAdd("path", "描边", sc, nm, pi);
           }
         } catch (e9) {}
       }
@@ -810,7 +816,10 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
       } catch (e6) {} }
       // v6.2: 色值极浅——填充/描边任一为 CMYK 且某分量四舍五入后 0<值<5
       // v8.5: 复用上面一次读出的 light,不再回读色值
-      try {
+      // v10.11: 收进 CK.ik 门 —— black.light 是卡⑥的内容(文字侧本就在门内);
+      //   与 v10.8 的 thin 同款: 此前靠"rfc/rsc=null 隐式兜"不炸, 一旦赋值挪出
+      //   CK.ik 门(如给叠印复用)就会变成关⑥还在算卡⑥, 显式门控不留雷。
+      if (CK.ik) { try {
         if (rfc && rfc.light) {
           black.light.count++;
           pfSampleAdd(black.light.samples,
@@ -821,7 +830,7 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
           pfSampleAdd(black.light.samples,
             { src: "path", where: "描边", desc: rsc.light, name: nm }, rsc.light + "|描边|" + nm + "|path", SAMPLE_CAP);
         }
-      } catch (e7) {}
+      } catch (e7) {} }
     }
 
     // ---------- 图片嵌入 + 分辨率 数据结构 ----------
@@ -1170,7 +1179,11 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
       // v10.0: 卡④⑤都关 ⇒ 连路径都不读
       if (CK.im || CK.rs) { try { fp = String(it.file.fsName); } catch (e11) {} }
       if (CK.im && imgs.linked.length < 5) {
-        imgs.linked.push({ name: it.name || "(链接图)", file: fp || "(无法读取路径)", missing: lkMissing });
+        // v10.10: it.name 包错 —— 这是全文件最后一处未包 try/catch 的属性读;
+        //   单张链接图读名字失败不该拖垮整轮扫描(外层 catch 会把 res.ok 打成 false)。
+        var nmB = "";
+        try { nmB = String(it.name || ""); } catch (eNm) {}
+        imgs.linked.push({ name: nmB || "(链接图)", file: fp || "(无法读取路径)", missing: lkMissing });
       }
       // 矢量链接(PDF/AI/EPS/SVG)没有有效分辨率: identity 矩阵会被算成
       // 72ppi 而误报"低于300ppi", 只跳过已知矢量(v3.6)。

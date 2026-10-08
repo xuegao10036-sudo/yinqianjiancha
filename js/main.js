@@ -2,11 +2,11 @@
 (function () {
   "use strict";
 
-  var JS_BUILD = "20261007-12";
+  var JS_BUILD = "20261008-2";
   // 必须与 jsx/preflight.jsx 里的 PF_BUILD 保持一致。
   // JSX 每次返回都会带上它的构建号,前端据此判断 ExtendScript 引擎里
   // 加载的是不是当前版本 —— 不一致就强制 $.evalFile 重载(见 execJsx)。
-  var JSX_BUILD = "10.9";
+  var JSX_BUILD = "10.11";
   // v10.2 收尾: 「耗时较长」提示阈值 —— 原先 20000 在 run() 与 execAction() 各写一遍,
   //   连提示语里的「20 秒」也是手写 ⇒ 改口径要动 3 处、漏一处就文案与行为不一致。收成一处。
   var BUSY_TIMEOUT_MS = 20000;
@@ -267,7 +267,14 @@
     }
   }
   // 渲染取阈值: 优先本次回传的生效值, 其次上次值; 都没有给 "?"(宁可见问号也不猜数字)
-  function thv(k) { return (PF_TH && PF_TH[k] !== undefined && PF_TH[k] !== null) ? PF_TH[k] : "?"; }
+  // v10.11: thRefresh 只回填 6 个可编辑键 —— 若在首次扫描前重建过 PF_TH,
+  //   light/cap/scan 三项会落空, thv 回退 TH_DEF 兜底(正常路径 render 开头
+  //   就会用 res.th 九键整体覆盖, 此兜底只影响扫描前的边缘路径)。
+  function thv(k) {
+    if (PF_TH && PF_TH[k] !== undefined && PF_TH[k] !== null) return PF_TH[k];
+    if (TH_DEF && TH_DEF[k] !== undefined && TH_DEF[k] !== null) return TH_DEF[k];
+    return "?";
+  }
 
   // 取"当前生效阈值": 已有默认值则直接算; 否则问 jsx 要一次默认值(只回默认, 不扫描文档)
   var thBusy = false, thQ = [];

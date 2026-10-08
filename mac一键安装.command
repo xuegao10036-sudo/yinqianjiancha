@@ -1,6 +1,6 @@
 #!/bin/bash
 # Install / update the preflight panel for Adobe Illustrator (macOS)
-# Same panel as the Windows 安装.bat — unsigned extension, needs CEP debug mode.
+# Same panel as the Windows installer bat - unsigned extension, needs CEP debug mode.
 set -u
 SRC="$(cd "$(dirname "$0")" && pwd)"
 DEST="$HOME/Library/Application Support/Adobe/CEP/extensions/yinqianjiancha"
@@ -29,16 +29,16 @@ fi
 echo ""
 echo "[2/3] Enable CEP debug mode (required for unsigned extensions)"
 ok=1
-for V in 9 10 11 12 13 14; do
+for V in 9 10 11 12 13 14 15 16; do
   defaults write "com.adobe.CSXS.$V" PlayerDebugMode 1 || ok=0
 done
 # flush the preference cache so the change takes effect without a reboot
 killall cfprefsd 2>/dev/null || true
 if [ "$ok" = 1 ]; then
-  echo "      OK - PlayerDebugMode set for CSXS 9 to 14."
+  echo "      OK - PlayerDebugMode set for CSXS 9 to 16."
 else
   echo "      WARN - could not write defaults."
-  echo "             FIX: run 'bash install.command' from Terminal and read the error."
+  echo "             FIX: run 'bash \"$(basename "$0")\"' from Terminal and read the error."
 fi
 
 echo ""
