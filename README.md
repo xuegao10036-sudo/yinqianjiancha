@@ -186,8 +186,8 @@ CEP 9（CSXS 9），实际下限约为 AI 23——更早版本装上了也未必
 **环境要求**：macOS；Illustrator 23（CC 2019）及以上。⚠ macOS 版脚本**未经真机验证**，遇到问题请提 Issue。
 
 1. 下载并解压（不要在压缩包里直接双击脚本）
-2. **终端**里进入解压后的文件夹，执行：`bash install.command`
-   （也可双击 `install.command`；若系统拦截，到「系统设置 → 隐私与安全性」点「仍要打开」）
+2. **终端**里进入解压后的文件夹，执行：`bash mac一键安装.command`
+   （也可双击 `mac一键安装.command`；若系统拦截，到「系统设置 → 隐私与安全性」点「仍要打开」）
 3. **重启 Illustrator** → 菜单 `窗口 → 扩展功能 → 印前检查-雪糕`
 
 脚本做三件事：复制文件到 `~/Library/Application Support/Adobe/CEP/extensions/yinqianjiancha`、
@@ -252,7 +252,7 @@ yinqianjiancha/
 ├─ jsx/preflight.jsx     宿主脚本（在 Illustrator 内运行扫描与一键操作）
 ├─ CSXS/manifest.xml     CEP 扩展清单
 ├─ 安装.bat              安装 / 更新（覆盖面板文件，可重复执行）
-├─ install.command       macOS 安装 / 更新（同上，未经真机验证）
+├─ mac一键安装.command    macOS 安装 / 更新（同上，未经真机验证）
 ├─ 卸载.bat              卸载
 ├─ README.md             本文件
 ├─ 更新日志.txt          完整变更日志
