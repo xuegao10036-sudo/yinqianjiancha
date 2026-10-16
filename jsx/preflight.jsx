@@ -104,7 +104,23 @@ function pfStringify(value) {
 // 不一致/不存在 → 强制重载一次。这样开发期改完 JSX 无需重启 AI。
 // v7.2: 仅随版本号递增(本版为面板文案一致化,检测逻辑与返回结构零改动)。
 // v10.1: 版本号 —— 面板/宿主同步递增
-var PF_BUILD = "10.11";
+// v10.46: 全量审查修复(P1-1 符号口径 / P2-1 色板轮内复用 / P2-2 死字段 /
+//   P2-4 sawHidden / P2-5 嵌入位图 XMP 锚表)
+// v10.60(审查 2.2/2.4/2.6): 颜色收集深度上限 20->64 与主扫描统一; pfThCopy 补 htCap;
+//   __pfUsedCache 两处失效点(进 pfClearUnusedSwatches 即清 + pfClearUnusedGradPattern 读完即清)
+// v11.0: 版本号跃升至 11.0(从 10.60 起进入 11.x 线; 代码内容与 v10.60 一致, 仅版本标识变更)
+var PF_BUILD = "11.0";
+
+// v10.46(审查 P2-1): 颜色收集的**轮内**复用缓存。
+//   onClearSwatches 用 execActionMulti 串联 pfClearUnusedSwatches + pfClearUnusedGradPattern,
+//   两个函数原先各自 pfUsedColorKeys(doc) 全文档遍历一遍(textFrames + 所有图层 items,
+//   大文档各要数秒) ⇒ 用户点一次按钮付两遍。
+//   现在第一个动作通过安全闸后把结果存这里, 第二个动作直接复用。
+//   v10.60(审查 2.6): 补两处失效点, 把"跨轮串味"堵死 ——
+//     ① pfClearUnusedSwatches **进函数即清**(它恒是每轮的第一个动作): 万一本轮在安全闸
+//        处提前 return(没走到下面的覆写), 缓存就不会停在上一次的值;
+//     ② pfClearUnusedGradPattern **读完即清**(一次性消费): 若将来出现单独入口, 也拿不到残值。
+var __pfUsedCache = null;
 
 // ============================================================
 // v10.1: 阈值唯一真源 —— 全部阈值集中在这张表, 前端不再保存任何阈值数字
@@ -121,7 +137,10 @@ var PF_TH_DEF = {
   inkWarn: 300,  // 油墨总量超过此值算超标(红)           <- 原 INK_WARN
   reso: 300,     // 图片有效分辨率低于此值(ppi)判偏低    <- 原 RESO_MIN
   cap: 5,        // 油墨/描边采样条数上限(按不同值计)    <- 原 SAMPLE_CAP
-  scan: 3000     // 每类对象最多扫描数量(防大卡死)       <- 原 MAX_SCAN
+  scan: 3000,    // 每类对象最多扫描数量(防大卡死)       <- 原 MAX_SCAN
+  // v10.39(审查 B6): 隐藏文字统计的帧数上限提成真源 —— 前端那句"仅统计前 N 个"改读
+  //   hiddenText.cap(本值), 不再两侧各写一个 500。
+  htCap: 500     // 隐藏文字统计帧数上限(诊断性质, 大文档不再往下数, 挂 truncated)
 };
 
 var PT2MM = 0.3527777778;     // 1 pt = 0.3528 mm
@@ -137,9 +156,13 @@ var INK_WARN = PF_TH_DEF.inkWarn;
 var RESO_MIN = PF_TH_DEF.reso;
 
 // 阈值表浅拷贝(全是数字, 逐个列出而不是 for-in —— 免得把原型链上的东西带出去)
+// v10.60(审查 2.4): 补齐 htCap —— 原实现漏带该项, 使 pfThDefaults 下发的默认表缺 htCap。
+//   当前前端走 htx.cap 取该值(唯一真源), 侥幸未暴露; 但任何读 th.htCap 的调用方都会
+//   拿到 undefined ⇒ 补上, 让"浅拷贝 == 全字段"这条语义成立(新加字段不再被漏掉)。
 function pfThCopy(t) {
   return { bleed: t.bleed, tiny: t.tiny, thin: t.thin, light: t.light,
-           inkOk: t.inkOk, inkWarn: t.inkWarn, reso: t.reso, cap: t.cap, scan: t.scan };
+           inkOk: t.inkOk, inkWarn: t.inkWarn, reso: t.reso, cap: t.cap, scan: t.scan,
+           htCap: t.htCap };
 }
 // 面板首次打开设置时向 jsx 要默认值 —— 只回默认值, 不碰文档、不扫描
 function pfThDefaults() {
@@ -154,16 +177,20 @@ function pfThDefaults() {
 //   v10.9: 不认 ≠ 不动 —— 工作副本(BLEED_MIN_MM 等)仍要**无条件回默认**。jsx 上下文常驻,
 //     若字段数不符就提前 return, 模块级阈值会留着**上一次扫描**的值 ⇒ 判定用旧阈值、res.th
 //     却回默认 ⇒ 显示与判定不同源(雪糕 2026-10-07 真机踩中: 阈值改回默认后报出旧阈值结果)。
+// v10.32: 面板只传这 6 项(都是 <name>|<name>|… 的顺序线序),
+//   提成模块级常量 —— 原先每轮 check 都在函数内新建一次数组, 属可省的分配。
+var PF_TH_KEYS = ["bleed", "reso", "thin", "tiny", "inkOk", "inkWarn"];
+
 function pfThApply(s) {
   var t = pfThCopy(PF_TH_DEF);
-  var keys = ["bleed", "reso", "thin", "tiny", "inkOk", "inkWarn"];
+  // v10.33: 去掉 `var keys = PF_TH_KEYS;` 别名(审查 v10.32 第 10 条) —— 常量不会改, 直接用更直白。
   var parts = String(s === undefined || s === null ? "" : s).split("|");
   var i, v;
   // v10.9: 字段校验收进 if —— 工作副本赋值无条件执行, 字段数不符时 t 即全默认。
-  if (parts.length === keys.length) {
-    for (i = 0; i < keys.length; i++) {
+  if (parts.length === PF_TH_KEYS.length) {
+    for (i = 0; i < PF_TH_KEYS.length; i++) {
       v = parseFloat(parts[i]);
-      if (!isNaN(v) && isFinite(v) && v > 0) t[keys[i]] = v;
+      if (!isNaN(v) && isFinite(v) && v > 0) t[PF_TH_KEYS[i]] = v;
     }
     if (t.inkWarn <= t.inkOk) t.inkWarn = Math.max(t.inkOk + 1, PF_TH_DEF.inkWarn);
   }
@@ -276,10 +303,69 @@ function pfOvpInfo(c) {
   if (!o) { try { if (c && c.typename) desc = String(c.typename); } catch (e2) {} }
   var white = !!(o && ((o.type === "cmyk" && o.total === 0) ||
                        (o.type === "rgb" && o.desc === "RGB(255,255,255)")));
-  return { desc: desc, white: white };
+  // v10.43(审查 P3-3): 把 pfInkSum 的完整结果挂在 _o 上 —— pfOvpAdd 紧接着算四分类时
+  //   可直接复用, 同一颜色不必再跑一遍 pfInkSum。⚠ _o 仅内部传递用: 本函数的消费方
+  //   (pfOvpAdd)只取 desc/white 标量, _o 不会随 res 回传前端。
+  return { desc: desc, white: white, _o: o };
 }
 // v10.11: 删除 pfOvpDesc —— "兼容旧调用(只要色值说明)"的一行包装, 全工程零引用
 // (pfOvpInfo 统一后旧调用点早已改完), 属遗留死代码; 已 grep 源码+测试确认为 0 引用。
+
+// v10.14: 叠印四分类 —— 单黑 / 纯白 / 彩色 / 专色, 供卡⑦分级版展示与规则动作筛选。
+//   · "white"  纯白: CMYK/Gray 四色**原值之和 < 1**(极小非零也按白处理), 或 RGB(255,255,255)
+//   · "k100"   单黑: CMYK 且 C/M/Y 原值均 < 1、K 原值 >= 100(Gray K100 亦算)
+//   · "spot"   专色: 专色 / 渐变 / 图案等非 CMYK 可判类
+//   · "color"  彩色: 其余 CMYK(RGB 归此类)
+//   ⚠ 判定顺序: white 优先于 k100 —— K0 的白不可能同时是 K100, 天然互斥, 顺序只为稳妥。
+//   ⚠ 全部分类一律**读原值**, 不拿取整后的显示串反推(用 desc 判 K100, K99.6 显示成
+//     K100 会误判为单黑, 方向反了)。
+// v10.43(审查 P3-3): 拆出带 info 的变体 —— pfOvpAdd 已为白计数算过 pfOvpInfo(内含
+//   一次 pfInkSum), 原 pfOvpClass 又对同一颜色跑一遍 pfInkSum。现在把 info._o 传进来
+//   直接复用; 调用方没有 info(如规则动作侧)时传 null, 行为与原版逐字一致。
+//   ⚠ white 两口径并存不变: info.white 是 ===0(pfOvpInfo 原口径, 白叠印计数用),
+//     pfOvpClass 内的是 <1(四分类口径) —— 复用 pfInkSum 结果不影响任何一侧的判定。
+function pfOvpClass(c) { return pfOvpClass2(c, null); }
+function pfOvpClass2(c, info) {
+  var o = null;
+  try { o = (info && info._o) ? info._o : pfInkSum(c); } catch (e) {}
+  if (!o) {
+    // pfInkSum 返 null: 无填充/描边(NoColor)或读不出 —— 归专色类兜底(不误判为白/黑)
+    return { cls: "spot", desc: pfOvpInfoDesc(c), white: false };
+  }
+  var desc = o.desc;
+  if (o.type === "rgb") {
+    if (o.desc === "RGB(255,255,255)") return { cls: "white", desc: desc, white: true };
+    return { cls: "color", desc: desc, white: false };
+  }
+  if (o.type === "spot" || o.type === "other") return { cls: "spot", desc: desc, white: false };
+  // cmyk(含 Gray 归一: total=K 原值)。四色原值之和 < 1 ⇒ 纯白(极小非零也算白)
+  if (o.total < 1) return { cls: "white", desc: desc, white: true };
+  // 单黑判定: 读原值 —— C/M/Y 均 < 1 且 K >= 100
+  if (pfIsK100Raw(c)) return { cls: "k100", desc: desc, white: false };
+  return { cls: "color", desc: desc, white: false };
+}
+// v10.14: 单黑原值判定 —— 直接读颜色对象原值, 不解析显示串。
+//   CMYK: C/M/Y 均 < 1 且 K >= 100; Gray: gray >= 100。
+function pfIsK100Raw(c) {
+  try {
+    var tn = "";
+    try { tn = c.typename; } catch (et) { return false; }
+    if (tn === "GrayColor") return (c.gray >= 100);
+    if (tn !== "CMYKColor") return false;
+    var cy = c.cyan, mg = c.magenta, yl = c.yellow, bk = c.black;
+    return (cy < 1 && mg < 1 && yl < 1 && bk >= 100);
+  } catch (e) { return false; }
+}
+function pfOvpInfoDesc(c) {
+  try { var o = pfInkSum(c); if (o && o.desc) return o.desc; } catch (e) {}
+  try { if (c && c.typename) return String(c.typename); } catch (e2) {}
+  return "(无)";
+}
+
+// v10.32: 采样池内部去重键字段名 —— 提成模块级常量。
+//   原先每个写入点都各写一遍 "_k" 字符串字面量(易拼错且 grep 时噪声大);
+//   这里只作纯字面量替换, 行为零变化。
+var PF_SAMPLE_KEY = "_k";
 
 // v7.8: 采样池——同一个"值"只占 1 条,条数上限 cap;同值再出现时只累加它的 n。
 //   为什么:前端拿到 5 条原始样本后会把重复的合并成一行并加 " ×n",
@@ -290,9 +376,9 @@ function pfOvpInfo(c) {
 //   注意: 池满后再出现的**新**值直接丢弃(不显示也不计数)——它由块标题的总数与前端截断提示兜住。
 function pfSampleAdd(list, rec, key, cap) {
   for (var i = 0; i < list.length; i++) {
-    if (list[i]._k === key) { list[i].n++; return; }
+    if (list[i][PF_SAMPLE_KEY] === key) { list[i].n++; return; }
   }
-  if (list.length < cap) { rec._k = key; rec.n = 1; list.push(rec); }
+  if (list.length < cap) { rec[PF_SAMPLE_KEY] = key; rec.n = 1; list.push(rec); }
 }
 
 // v7.9: 采样池"只留最值前 cap 个"—— dir<0 留最大(油墨总量,从高到低),dir>0 留最小(图片 ppi,从低到高)。
@@ -305,14 +391,14 @@ function pfSampleAdd(list, rec, key, cap) {
 function pfSampleAddTop(list, rec, key, cap, field, dir) {
   var i, j;
   for (i = 0; i < list.length; i++) {
-    if (list[i]._k === key) { list[i].n++; return; }
+    if (list[i][PF_SAMPLE_KEY] === key) { list[i].n++; return; }
   }
   if (list.length >= cap) {
     var last = list[list.length - 1];
     if (dir < 0 ? rec[field] <= last[field] : rec[field] >= last[field]) return;
     list.pop();
   }
-  rec._k = key; rec.n = 1;
+  rec[PF_SAMPLE_KEY] = key; rec.n = 1;
   for (j = 0; j < list.length; j++) {
     if (dir < 0 ? rec[field] > list[j][field] : rec[field] < list[j][field]) break;
   }
@@ -551,13 +637,18 @@ function pfDocKey() {
 //   卡⑤走 resoCheck 入口,卡⑥⑦在对象分派分支里门控,卡③④同理。判定阈值/样本口径/卡片文案一律不变。
 function pfCkOn(v) { return !(v === 0 || v === false || v === "0"); }
 
-function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
+function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9) {
   var res = { ok: false };
   try {
     // v10.0: 各卡门控开关(缺省全开 —— 旧调用点不传参时行为与 v9.9 逐字一致)
     var CK = {
       ab: pfCkOn(c1), hd: pfCkOn(c2), ft: pfCkOn(c3), im: pfCkOn(c4),
-      rs: pfCkOn(c5), ik: pfCkOn(c6), ov: pfCkOn(c7)
+      rs: pfCkOn(c5), ik: pfCkOn(c6), ov: pfCkOn(c7),
+      // v10.13: 卡⑧色板(第 9 参 —— 第 8 位是阈值串, 见 ckArgs/swArg)。
+      //   ⚠ 缺省(旧 7 参/无参调用)按**关**处理 —— 与 zhiban 的缺省开不同: 印前承诺
+      //   「旧调用点行为与旧版逐字一致」(v10.0), 缺省开会让老调用多跑一次全文档色板遍历;
+      //   面板总是显式传 0/1, 不受影响。
+      sw: pfCkOn(c9 === undefined ? 0 : c9)
     };
     // v10.1: 先应用面板传来的阈值, 并立刻回传生效值 —— 前端只显示这个数,
     //   自己不留任何阈值数字。缺省(旧调用点 runPreflight())时 c8 为 undefined,
@@ -638,32 +729,64 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
     // ---------- 2. 色彩模式 ----------
     res.colorMode = (doc.documentColorSpace === DocumentColorSpace.CMYK) ? "CMYK" : "RGB";
 
+    // ---------- 2a. 色板(未使用色板统计) ----------
+    // v10.13: 卡⑧「色板」(zhiban v0.7.8 状态移植) —— 统计"文档色板里有哪些没被使用",
+    //   供前端显示数量。只在卡⑧开启时跑(关掉则一个色板属性都不读)。
+    //   ⚠ 这里只统计**不修改** —— 真正删除走 pfClearUnusedSwatches()(按钮触发)。
+    //   口径与删除动作严格一致(共用 pfUsedColorKeys / pfIsSystemSwatch),
+    //   避免"说能删 5 个、点下去只删 3 个"这种前后不一致。
+    var swatchInfo = null;
+    if (CK.sw) {
+      // 同卡附带"未使用渐变/未使用图案"统计 —— v10.28: pfUsedColorKeys 只调一次,
+      //   结果同时喂给 pfSwatchScan(usedPre)/渐变/图案/颜色组, 消除同轮双调(审计疑似2)。
+      var usedOnce = null;
+      try { usedOnce = pfUsedColorKeys(doc); } catch (eUO) { usedOnce = null; }
+      swatchInfo = pfSwatchScan(doc, usedOnce);
+      res.swatch = swatchInfo;
+      res.gradient = pfGradientScan(doc, usedOnce);
+      res.pattern = pfPatternScan(doc, usedOnce);
+      // 颜色组统计(读不到 swatchGroups 时 supported=false, 前端自动隐藏该行)
+      res.swatchGroup = pfSwatchGroupScan(doc, usedOnce);
+    }
+
     // ---------- 2b. 隐藏对象检查 ----------
-    var hidden = { layerCount: 0, itemCount: 0, layerNames: [], truncated: false };
+    // v10.15: hiddenLayerItems = 隐藏图层内的对象数(含层内隐藏对象) —— 供前端判断
+    //   「删除全部隐藏对象」按钮是否该显示(删除范围只含可见图层内的隐藏对象)。
+    var hidden = { layerCount: 0, itemCount: 0, layerNames: [], truncated: false, hiddenLayerItems: 0 };
     // v8.1: 主遍历是否见过"隐藏节点"(隐藏图层/隐藏组/隐藏对象)。
     //   没见过 ⇒ 文档里不可能有隐藏文字 ⇒ 跳过下面那次文档级 textFrames 全量扫描。
     //   ⚠ 只在"确认没有隐藏内容"时为 false;任何读取异常都保守置 true(宁可多扫,不可漏报)。
     var sawHidden = false;
 
-    function checkLayerVisible(layer) {
+    // v10.32: 原先这里是独立的 checkLayerVisible() 递归(见旧注释), 把 doc.layers 整棵树
+    //   又走了一遍 —— 而下面 walkLayer 本来就要走同一棵树。两次遍历读的是同一批
+    //   layer.visible / layer.pageItems, 等于把"读图层可见性 + 读图层对象列表"这两笔
+    //   跨桥开销**整份付了两遍**(大图层树文件的图层遍历成本直接翻倍)。
+    //   现改为把隐藏图层统计**并进 walkLayer 的那一趟**: walkLayer 在判断
+    //   `ly.visible === false` 的那个分支里顺手记 layerCount / layerNames / hiddenLayerItems。
+    //   ⚠ 口径必须与旧 checkLayerVisible 逐字一致 —— 旧实现在**任意深度**上, 只要某层
+    //     visible===false 就计 1 层、并把该层 pageItems.length 加进 hiddenLayerItems, 且
+    //     **不管祖先层是否已隐藏**(子层的子层仍会被访问到)。
+    //     walkLayer 的隐藏分支是 `return`(整棵子树剪枝) —— 所以合并版必须**在 return 之前**
+    //     显式再走一遍"隐藏层下的子层", 否则"隐藏层套隐藏子层"会少计; 这正是旧行为与此前
+    //     语义的差别所在, 现按旧口径补回(见 walkLayer 的 hLayer 分支)。
+    //   ⚠ CK.hd(卡②关) 时旧实现整段跳过、hidden 全为 0; walkLayer 侧统计也必须同样门控,
+    //     否则关卡后 hidden 计数会冒出来(与 v10.0 的"关卡即不统计"口径相悖)。
+
+    // 把"隐藏图层"的账记上(含该层直接对象数)。祖先层已隐藏时子层仍要计入 —— 由
+    // walkLayer 的 hLayer 分支负责把这棵子树继续走完(walkLayer 走完不会重复记可见层的对象)。
+    function tallyHiddenLayer(ly) {
+      hidden.layerCount++;
       try {
-        if (layer.visible === false) {
-          hidden.layerCount++;
-          if (hidden.layerNames.length < 5) hidden.layerNames.push(layer.name || "(未命名图层)"); // v5.19: 10→6; v6.5: →5(列表统一"仅列前 5")
-        }
-      } catch (ehl) {}
-      try {
-        var subL = layer.layers;
-        var slLim = subL.length; // v10.0: 长度外提
-        for (var si = 0; si < slLim; si++) checkLayerVisible(subL[si]);
-      } catch (ehl2) {}
-    }
-    if (CK.hd) { // v10.0: 卡②关 ⇒ 整段文档级图层可见性补扫跳过(遍历里的 hidden 判定保留)
-      try {
-        var allLayers = doc.layers;
-        var aLim = allLayers.length; // v10.0: 长度外提
-        for (var liH = 0; liH < aLim; liH++) checkLayerVisible(allLayers[liH]);
-      } catch (ehl3) {}
+        // v10.43(审查 P3-1): 硬编码 5 → SAMPLE_CAP(与其余样本列表同一真源, v10.39 B6 同款)
+        if (hidden.layerNames.length < SAMPLE_CAP) hidden.layerNames.push(ly.name || "(未命名图层)");
+      // v10.33: catch 里也要判 < 5(审查 v10.32 第 4 条) —— 原先无条件 push, 若多个图层的
+      //   name 都读抛异常, layerNames 会超过 5 个, 前端渲染出多余行(与其他层的"仅列前 5"不一致)。
+      } catch (eHLN) { if (hidden.layerNames.length < SAMPLE_CAP) hidden.layerNames.push("(未命名图层)"); } // v10.43(P3-1): 同走 SAMPLE_CAP
+      // v10.15: 统计隐藏图层内的对象数(含层内隐藏对象) —— 删除动作只删可见图层内的
+      //   隐藏对象, 隐藏图层内容一律保留; 若可见图层内没有可删目标(itemCount===0),
+      //   按钮就不该出现, 此处给出判据。
+      try { hidden.hiddenLayerItems += ly.pageItems.length; } catch (ehli) {}
     }
 
     // 隐藏"对象"统计: v3.7 起随树遍历顺带统计(每类独立配额 underQuota),
@@ -709,7 +832,13 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
       // v8.3: 叠印——文字(字符级) + 图形(pageItem 级) 共用一个池,count 为全量真值
       // v9.6: locked = 其中落在**锁定**对象/图层/锁定组里的处数(照常计入 count, 只多报一个数,
       //   供卡⑦ 提示"其中锁定 N 处, 勾选「解锁全部」可一并清除")。
-      overprint: { count: 0, white: 0, text: 0, path: 0, locked: 0, samples: [] }
+      // v10.14: 四分类计数(k100 单黑 / spot 专色 / color 彩色)新增, white 沿用既有字段;
+      //   旧前端(不认新键)零影响 —— 多出的键没人读就是了。
+      // v10.35(审查 #4): 加 truncated —— 原先 path/compound 超配额只挂 black.path.truncated,
+      //   而卡⑦叠印判定读的是 overprint.count。若前 3000 个 path 无叠印、第 3001 个有叠印后被
+      //   配额截断 ⇒ count 停在 0、前端显示"无叠印"+绿徽标 —— **漏检却报通过**, 印刷上最危险。
+      //   三处 underQuota 失败须同步把本字段置真(见下方 path/compound/text 分支)。
+      overprint: { count: 0, white: 0, k100: 0, spot: 0, color: 0, text: 0, path: 0, locked: 0, samples: [], truncated: false }
     };
 
     // 按阈值归类,并记录样本(v5.6/B2: 文字/路径各自独立)
@@ -750,16 +879,29 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
     //   ⚠这一判只在**命中叠印**时才跑(命中本就稀少),一次 parent 链走查对整体扫描无感。
     function pfOvpAdd(src, where, colorObj, name, item) {
       var info = pfOvpInfo(colorObj);
+      // v10.14: 四分类(供分级版叠印卡展示与规则动作筛选)。
+      //   ⚠ 与 zhiban 逐字同款: white 计数仍走 pfOvpInfo 的原口径(四色原值和===0 才算白),
+      //   四分类走 pfOvpClass 的口径(和<1 也算白, 极小非零印出来照样花)——两口径并存,
+      //   简洁版「白叠印 N 处」的数字与 v10.13 逐字一致, 零漂移。
+      //   pfOvpAdd 只在叠印命中时才跑(本就稀少), 多一次 pfInkSum 读取对扫描无感。
+      // v10.43(审查 P3-3): 改传 pfOvpClass2(colorObj, info) —— 复用 info 里已算过的
+      //   pfInkSum 结果, 同一颜色不再读两遍(原 pfOvpClass 内部会再跑一次)。
+      var cls = pfOvpClass2(colorObj, info);
       black.overprint.count++;
       if (info.white) black.overprint.white++;
+      if (cls.cls === "k100") black.overprint.k100++;
+      else if (cls.cls === "spot") black.overprint.spot++;
+      else if (cls.cls === "color") black.overprint.color++;
       if (src === "text") black.overprint.text++; else black.overprint.path++;
       if (item) {
         var blkO = null;
         try { blkO = pfBlockInfo(item); } catch (eBlkO) {}
-        if (blkO && blkO.reason === "locked") black.overprint.locked++;
+        // v10.35(审查 #6): 改用 locked 布尔 —— 原判 `reason === "locked"` 会漏掉
+        //   "同一节点既隐藏又锁定"的对象(那时 reason 报的是 hidden)。
+        if (blkO && blkO.locked) black.overprint.locked++;
       }
       pfSampleAdd(black.overprint.samples,
-        { src: src, where: where, desc: info.desc, name: name, white: info.white },
+        { src: src, where: where, desc: info.desc, name: name, white: info.white, cls: cls.cls },
         src + "|" + where + "|" + info.desc + "|" + name, SAMPLE_CAP);
     }
 
@@ -771,13 +913,22 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
       //   (油墨/细描边/极浅各一次)、两个色句柄各读 2 次;同一个色对象一次读出 ink+light。
       var stk = false;
       try { stk = (pi.stroked === true); } catch (e0) {}
+      // v10.32: filled 也读一次 —— pfUsedColorKeys(删色板)那边只登记 filled===true 的对象
+      //   填充色, 若这边不判 filled 直接读 fillColor, 对"未填充但有残留 fillColor 句柄"的
+      //   路径会多记一个油墨对象 ⇒ 两侧口径不一致(雪糕反馈类问题)。
+      //   ⚠ 判法必须是**只在明确为 false 时跳过**: `filled` 读不到(抛异常)或为 undefined
+      //     (老 mock / 个别对象类型没有该属性)时一律**保守放行**照读 fillColor ——
+      //     若反过来用 `=== true` 当门, 会把"没这个属性"的路径全部静默漏掉(实测踩中:
+      //     mock 里 PathItem 不设 filled, 油墨计数直接归 0)。
+      var fld = true;
+      try { fld = (pi.filled !== false); } catch (eFld) { fld = true; }
       // v10.11: fc/sc 按需读取 —— 原先在入口无条件预读, ⑥关⑦开时白读(⑦只在叠印
       //   命中时才需要色值);口径对齐文字侧 v10.0 的"命中才补读"(pfOvpAdd 读不到
       //   会兜成不报, 与原行为一致)。
       var fc = null, sc = null;
       var rfc = null, rsc = null;
       if (CK.ik) { // v10.0: 卡⑥关 ⇒ 不读油墨/极浅
-        try { fc = pi.fillColor; } catch (e1) {}
+        if (fld) { try { fc = pi.fillColor; } catch (e1) {} }
         try { rfc = pfInkLightBoth(fc); } catch (e3) { rfc = null; }
         try { if (stk) { sc = pi.strokeColor; rsc = pfInkLightBoth(sc); } } catch (e4) { rsc = null; }
         if (rfc) inkBucket(bp, rfc, nm, "填充");
@@ -878,7 +1029,9 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
         // v5.19: 15→8; v6.5: →5(列表统一"仅列前 5")
         // v7.9: 只留**分辨率最低的 5 张**,并按 ppi 从低到高排好(原来取的是文档里最先遇到的 5 张)
         //   这里用递增序号做 key ⇒ 不去重(每张图各占一条;同图重复置入也各自可见)
-        pfSampleAddTop(reso.samples, { name: label, ppi: ppi }, "r" + reso.total, 5, "ppi", 1);
+        // v10.39(审查 B6): 硬编码 5 → SAMPLE_CAP(= PF_TH_DEF.cap)。数字本来就相等, 但这里
+        //   该跟"唯一真源"走 —— 将来 cap 改了, 分辨率列表不会掉队。
+        pfSampleAddTop(reso.samples, { name: label, ppi: ppi }, "r" + reso.total, SAMPLE_CAP, "ppi", 1);
       } else {
         reso.okCount++;
       }
@@ -917,15 +1070,36 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
     }
 
     // 无位图时跳过 XMP 解析(XMP 文本可能很大,解析开销高)
-    var xmpEmbNames = (ris.length > 0) ? xmpEmbeddedNames() : [];
+    // v10.43(审查 P3-4): 再加 CK.rs 门控 —— xmpEmbNames 只服务卡⑤的 resoCheck 标签
+    //   (卡⑤关时 resoCheck 首行即 return, embName 的结果被立即丢弃), CK.im 不消费它。
+    //   两卡都关时白读一次 doc.XMPString 跨桥, 纯浪费。
+    var xmpEmbNames = (CK.rs && ris.length > 0) ? xmpEmbeddedNames() : [];
     var xmpSeq = 0;      // 顺序兜底指针
     var rasterIdx = 0;   // 已处理的嵌入位图计数
     var placedIdx = 0;   // 已处理的链接图计数
+    // v10.46(审查 P2-5): 可见嵌入位图 -> XMP 白名单条目的锚表。
+    //   原实现 `xmpEmbNames.length === ris.length` 才按索引精确对应 —— ris 是文档级
+    //   **全集**(含隐藏位图), 而调用处传的 rasterIdx 只数**可见**的; 文档含隐藏位图时
+    //   该条件恒不成立, 于是全部挤到顺序兜底(xmpSeq 也按可见顺序推进) —— 隐藏位图
+    //   在白名单里占着条目却进不了可见序列 ⇒ 可见位图的名字整体前移一位(错配)。
+    //   现在按 ris 全集顺序数嵌入位图, 只给**可见**的登记它对应的白名单序号,
+    //   隐藏位图占的条目被自然跳过; XMP 解析失败(白名单空)时锚表为空, 退顺序兜底。
+    var embAnchor = [];
+    if (xmpEmbNames.length > 0) {
+      try {
+        var embK = 0;
+        for (var fi = 0; fi < ris.length; fi++) {
+          var fIt = ris[fi], fVis = true;
+          try { fVis = !pfBlockInfo(fIt); } catch (eFi) { fVis = true; }
+          if (fVis) embAnchor.push(embK);
+          embK++;
+        }
+      } catch (eAn) { embAnchor = []; }
+    }
     function embName(item, idx, fallback) {
       var n = imgName(item, "");
       if (n !== "") return n;
-      // XMP 嵌入条目数与文档嵌入位图数一致时,按索引精确对应;否则按顺序兜底
-      if (xmpEmbNames.length === ris.length && idx < xmpEmbNames.length) return xmpEmbNames[idx];
+      if (idx < embAnchor.length && embAnchor[idx] < xmpEmbNames.length) return xmpEmbNames[embAnchor[idx]];
       if (xmpSeq < xmpEmbNames.length) return xmpEmbNames[xmpSeq++];
       return fallback;
     }
@@ -951,7 +1125,10 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
     function visitItem(it, depth, skipBleed) {
       if (depth > 64) return; // 防异常深嵌套导致栈溢出(超过深度放弃下钻)
       var tn = "";
-      try { tn = it.typename; } catch (eT) { return; }
+      // v10.46(审查 P2-4): typename 都读不到时**不敢断言无隐藏** —— 与其余读取失败点
+      //   (walkLayer 的 eLv/eLs/eLi、组的 eGk)一并置 sawHidden=true 同口径。
+      //   漏置的后果: CK.ft 开时整段隐藏文字补扫被跳过, 而隐藏文字扫描本不依赖树遍历成功。
+      try { tn = it.typename; } catch (eT) { sawHidden = true; return; }
 
       // 组: 隐藏组整棵子树跳过;可见组继续下钻
       if (tn === "GroupItem") {
@@ -1041,7 +1218,7 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
       if (tn === "TextFrame") {
         if (!skipBleed) bleedOf(it, false); // v5.25 出血先于配额;v10.0 剪枝子树跳过出血
         // v4.8: 配额检查前置,totalText 只统计实际扫描数(原在配额前++,超限仍虚增)
-        if (!underQuota("text")) { fonts.truncated = true; return; }
+        if (!underQuota("text")) { fonts.truncated = true; black.overprint.truncated = true; return; } // v10.35: 叠印同步挂截断(审查 #4)
         if (CK.ft) fonts.totalText++; // v10.0: 卡③关 ⇒ 不计文本总数
         // v8.5: characterAttributes 只解析一次 —— 原实现每步都重新解析
         //   textRange.characterAttributes(字体名 / 字号 / 填充色给油墨 / 填充色给极浅 / 叠印 共 5 遍),
@@ -1053,7 +1230,15 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
         }
         // v8.6: 片段只取一次 —— pfSnippet 是一次跨桥读(contents)+正则
         // v10.0: 且只在有卡真的要用它时才取(卡③极小字号样本 / ⑥油墨样本 / ⑦叠印样本)
-        var snip = (CK.ft || CK.ik || CK.ov) ? pfSnippet(it) : "";
+        // v10.32: 再改为**惰性取值** —— 上面那句"卡开着就取"仍会在"极小字号没命中 /
+        //   油墨桶不落样本 / 叠印没命中"时白读一次 contents(contents 是跨桥读, 且长文本
+        //   帧的字符串传输不便宜)。改成命中才真取: 四处使用点都已在"确实要用"的分支里,
+        //   首次调用即取、之后复用, 语义与"取一次"完全等价, 只是不再无条件先付钱。
+        var snip = null;
+        function getSnip() {
+          if (snip === null) snip = pfSnippet(it);
+          return snip;
+        }
         if (CK.ft) {
           var fn = "";
           try { fn = ca.textFont.name; }
@@ -1069,7 +1254,7 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
             var fsz = ca.size;
             if (typeof fsz === "number" && isFinite(fsz) && fsz > 0 && fsz < TINY_PT) {
               tiny.count++;
-              if (tiny.samples.length < 5) tiny.samples.push({ t: snip, pt: pfRound(fsz) });
+              if (tiny.samples.length < SAMPLE_CAP) tiny.samples.push({ t: getSnip(), pt: pfRound(fsz) }); // v10.43(P3-1): 硬编码 5 → SAMPLE_CAP
             }
           } catch (eSz) {}
         }
@@ -1081,11 +1266,11 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
             try { fcTx = ca.fillColor; } catch (eFc) { fcTx = null; }
             try { rtx = pfInkLightBoth(fcTx); } catch (eTi) { rtx = { total: -1, type: "mixed", desc: "混合颜色" }; }
           }
-          if (rtx) inkBucket(black.text, rtx, snip, "填充");
+          if (rtx) inkBucket(black.text, rtx, getSnip(), "填充");
           // v6.2: 色值极浅(文字填充色);v7.8: 按不同色值收,n 累加全量次数
           if (rtx && rtx.light) {
             black.light.count++;
-            var ltfName = snip;
+            var ltfName = getSnip();
             pfSampleAdd(black.light.samples,
               { src: "text", where: "填充", desc: rtx.light, name: ltfName },
               rtx.light + "|填充|" + ltfName + "|text", SAMPLE_CAP);
@@ -1099,11 +1284,11 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
           try {
             var ovf = pfCharOvpFill(ca), ovs = pfCharOvpStroke(ca);
             if (ovf || ovs) {
-              if (ovf) pfOvpAdd("text", "填充", fcTx, snip, it);
+              if (ovf) pfOvpAdd("text", "填充", fcTx, getSnip(), it);
               if (ovs) {
                 // v8.6: 描边色只在真的命中叠印描边时才读(多数帧不描边, 这一读可省)
                 var scTx = null; try { scTx = ca.strokeColor; } catch (eSc) {}
-                pfOvpAdd("text", "描边", scTx, snip, it);
+                pfOvpAdd("text", "描边", scTx, getSnip(), it);
               }
             }
           } catch (eOvp) {}
@@ -1112,14 +1297,22 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
       }
       if (tn === "PathItem") {
         if (!skipBleed) bleedOf(it, true);  // v5.25 出血先于配额;v10.0 剪枝子树跳过出血
-        if (!underQuota("path")) { black.path.truncated = true; return; }
+        if (!underQuota("path")) { black.path.truncated = true; black.overprint.truncated = true; return; } // v10.35: 叠印同步挂截断(审查 #4)
         scanPathInk(it);
         return;
       }
       if (tn === "CompoundPathItem") {
         if (!skipBleed) bleedOf(it, true);  // v5.25 出血先于配额;v10.0 剪枝子树跳过出血
-        if (!underQuota("compound")) { black.path.truncated = true; return; }
+        if (!underQuota("compound")) { black.path.truncated = true; black.overprint.truncated = true; return; } // v10.35: 同上
         try { scanPathInk(it.pathItems[0]); } catch (eC) {}
+        // ⚠ v10.53(审查 A2, **待真机验证再动**): 复合路径的叠印口径目前**三处不一致** ——
+        //   ① 这里(检查端)只读 pathItems[0] 这一个组件;
+        //   ② 动作侧文档级循环(doc.compoundPathItems)把 CompoundPathItem 自身交给
+        //      pfClrPath/pfRulePath —— 若该类型不暴露 fillOverprint/strokeOverprint,
+        //      pfOvp* 的 try 兜底会让那一路**静默无效**(不报错, 也不清任何东西);
+        //   ③ 符号下钻内(pfClrOvpIn / pfRuleInSym)又逐个组件处理。
+        //   谁与 AI 真机的"叠印属性到底挂在复合路径还是各组件上"一致, 只能真机验证后统一;
+        //   盲改会把"已清除 N 处"变成新的对不上账(数字与卡⑦ 不一致)。
         return;
       }
       if (tn === "MeshItem") {
@@ -1178,7 +1371,7 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
       // 文件路径只读一次: 前 5 个用于展示(v6.5: 50→5),同时取扩展名判断位图/矢量
       // v10.0: 卡④⑤都关 ⇒ 连路径都不读
       if (CK.im || CK.rs) { try { fp = String(it.file.fsName); } catch (e11) {} }
-      if (CK.im && imgs.linked.length < 5) {
+      if (CK.im && imgs.linked.length < SAMPLE_CAP) { // v10.43(P3-1): 硬编码 5 → SAMPLE_CAP
         // v10.10: it.name 包错 —— 这是全文件最后一处未包 try/catch 的属性读;
         //   单张链接图读名字失败不该拖垮整轮扫描(外层 catch 会把 res.ok 打成 false)。
         var nmB = "";
@@ -1202,9 +1395,29 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
     }
 
     // 图层: 隐藏图层整层子树跳过(0 次对象读取);可见层先下钻子图层再遍历对象
+    // v10.32: **同时承担隐藏图层统计**(合并自原 checkLayerVisible 的第二趟遍历)。
     function walkLayer(ly, depth) {
       if (depth > 64) return;
-      try { if (ly.visible === false) { sawHidden = true; return; } } catch (eLv) { sawHidden = true; return; }
+      var hLayer = false;
+      try { hLayer = (ly.visible === false); } catch (eLv) { sawHidden = true; return; }
+      if (hLayer) {
+        sawHidden = true;
+        // v10.0: 卡②关 ⇒ 不计 hidden(与旧 checkLayerVisible 的 CK.hd 门控一致)
+        if (CK.hd) tallyHiddenLayer(ly);
+        // ⚠ 旧 checkLayerVisible 是"逐层独立判" —— 隐藏层**下面**的子层照样会被访问,
+        //   若子层也隐藏, 那子层同样各计 1 层。这里必须把这棵子树继续走完(只统计、
+        //   不遍历对象), 否则"隐藏层套隐藏子层"会相对旧口径少计 layerCount /
+        //   hiddenLayerItems。⚠ 子树里的可见子层**不统计**(它本身不是隐藏层), 但其下
+        //   若有隐藏层仍需计入 —— 故一律递归下探, 不做可见性剪枝。
+        if (CK.hd) {
+          try {
+            var hSubs = ly.layers;
+            var hLim = hSubs.length; // v10.0: 长度外提
+            for (var hi = 0; hi < hLim; hi++) walkLayerHidden(hSubs[hi], depth + 1);
+          } catch (eLsH) {}
+        }
+        return;
+      }
       try {
         var subs = ly.layers;
         var sLim = subs.length; // v10.0: 长度外提
@@ -1215,6 +1428,22 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
         var iLim = items.length; // v10.0: 长度外提
         for (var ii = 0; ii < iLim; ii++) visitItem(items[ii], 0);
       } catch (eLi) { sawHidden = true; }   // v8.1: 对象列表读不到 ⇒ 同上
+    }
+
+    // v10.32: 隐藏层子树专用下探 —— 只统计隐藏层、**不遍历对象、不做任何检查**
+    //   (隐藏层内容本就不参与一切印刷检查)。与 walkLayer 的区别仅"不读 pageItems 内容"。
+    function walkLayerHidden(ly, depth) {
+      if (depth > 64) return;
+      var hh = false;
+      try { hh = (ly.visible === false); } catch (eLv2) { return; }
+      // v10.33: 补 CK.hd 门控(审查 v10.32 第 8 条) —— 当前唯一调用点本就在 CK.hd 分支内,
+      //   行为不变; 这里加上是防御: 将来若在别处调它统计别的量, 不会绕过"卡②关即不统计"的口径。
+      if (hh && CK.hd) tallyHiddenLayer(ly);
+      try {
+        var hs = ly.layers;
+        var hsLim = hs.length; // v10.0: 长度外提
+        for (var hsi = 0; hsi < hsLim; hsi++) walkLayerHidden(hs[hsi], depth + 1);
+      } catch (eLs2) {}
     }
     try {
       var topLayers = doc.layers;
@@ -1228,7 +1457,7 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
     // 其中)单独补一遍: 隐藏帧计数,字体名并入涉及字体与缺失检测。
     // 封顶 500 帧(诊断性质,大文档不再往下数,挂 truncated);
     // 可见性判定复用一键转曲的 pfBlockInfo(沿 parent 链找 hidden 节点)。
-    var hiddenText = { count: 0, missingCount: 0, truncated: false };
+    var hiddenText = { count: 0, missingCount: 0, truncated: false, cap: PF_TH_DEF.htCap };
     // v8.1: 前置门控 —— 主遍历只要遇到过一个隐藏节点(隐藏图层/隐藏组/隐藏对象),
     //   才可能存在"隐藏文字";一个都没遇到时隐藏文字必然为 0,于是这次"文档级 textFrames
     //   全量扫描(封顶 500 帧,每帧还都要沿 parent 链判可见性)"可以整段跳过。
@@ -1236,7 +1465,8 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
     if (sawHidden && CK.ft) { // v10.0: 卡③关 ⇒ 隐藏文字(字体)补扫整段跳过
       try {
         var dtfsAll = doc.textFrames;
-        var capHT = dtfsAll.length > 500 ? 500 : dtfsAll.length;
+        // v10.39(审查 B6): 封顶值改读 PF_TH_DEF.htCap —— 与前端"仅统计前 N 个"同一真源
+        var capHT = dtfsAll.length > PF_TH_DEF.htCap ? PF_TH_DEF.htCap : dtfsAll.length;
         for (var ht = 0; ht < capHT; ht++) {
           var tfH = dtfsAll[ht];
           var visH = true;
@@ -1336,6 +1566,643 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8) {
   }
 }
 
+// 系统保留色板名(永不删除)
+// ⚠ v0.2 修复(真机 bug): 名字随 Illustrator 界面语言变化 —— 中文版返回的是
+//   「[无]/[套版色]/[黑色]/[纸色]」, 英文版才是 [None]/[Registration]/[Black]/[White]。
+//   v0.1 只认英文名 ⇒ 中文 AI 下系统四项一个都没匹配上, 全被当成"未使用"列进删除清单。
+//   现改为**中英双名 + 类型判定**三保险:
+//     ① 名字白名单(中英各一套)
+//     ② Registration 类型判定(套版色有 !swatchType 或 swatchType === "REGISTRATION")
+//     ③ 保留规律: 系统四项目录固定排在最前 4 个(index 0..3), 用下标兜底
+//   ⚠ 下标兜底只在前面已按名字/类型判定过、且位置确实落在前 4 时才用 —— 不盲信下标。
+var PF_SYS_NAMES = {
+  "[None]": 1, "[无]": 1,
+  "[Registration]": 1, "[套版色]": 1,
+  "[Black]": 1, "[黑色]": 1, "[黑]": 1,
+  "[White]": 1, "[纸色]": 1, "[白色]": 1
+};
+
+function pfIsSystemSwatch(sw, idx) {
+  // ① 名字白名单(中英双名)
+  try { if (PF_SYS_NAMES[sw.name]) return true; } catch (e0) {}
+  // ② 类型判定: 套版色在所有语言下都是 REGISTRATION
+  try {
+    var st = sw.swatchType;
+    // SwatchType.REGISTRATION == 3 (但不同版本枚举值可能不同, 故同时认字符串)
+    if (st !== undefined && st !== null) {
+      if (String(st) === "3" || String(st).toUpperCase() === "REGISTRATION") return true;
+    }
+  } catch (e1) {}
+  // ③ 下标兜底: 系统四项恒为前 4 个 —— 名字读失败时仍能保住
+  if (idx !== undefined && idx !== null && idx < 4) return true;
+  return false;
+}
+
+// 颜色 -> 归一化键(色值匹配用; 专色走名字, 单列)
+// ⚠ v0.2 修复(真机 bug): 原用 pfRound()(一位小数)**精确相等**做键 ——
+//   色板里的 C15 M100 Y90 K10 与对象上的同色, 只要浮点尾数差 0.0001,
+//   拼出的键就不同 ⇒ 在用色板被判成"未使用"。改为**统一量化到整数**,
+//   且匹配时改用"容差比较"(见 pfColorKeyParts / pfUsedColorMatch),
+//   不再依赖字符串相等。
+function pfColorKey(c) {
+  if (!c) return null;
+  var t = "";
+  try { t = c.typename; } catch (e) { return null; }
+  try {
+    if (t === "SpotColor") return "SPOT:" + c.spot.name;
+    if (t === "CMYKColor")
+      return "CMYK:" + Math.round(c.cyan) + "," + Math.round(c.magenta) + "," + Math.round(c.yellow) + "," + Math.round(c.black);
+    if (t === "RGBColor") return "RGB:" + Math.round(c.red) + "," + Math.round(c.green) + "," + Math.round(c.blue);
+    if (t === "GrayColor") return "GRAY:" + Math.round(c.gray);
+    if (t === "GradientColor") return "GRAD:" + c.gradient.name;
+    if (t === "PatternColor") return "PATT:" + c.pattern.name;
+    if (t === "NoColor") return null;
+  } catch (e2) { return null; }
+  return null;
+}
+
+// 把颜色拆成可比较的分量对象(供容差匹配用)
+//   返回 { t:"cmyk"|"rgb"|"gray", v:[...] } 或 null
+function pfColorParts(c) {
+  if (!c) return null;
+  var t = "";
+  try { t = c.typename; } catch (e) { return null; }
+  try {
+    if (t === "CMYKColor") return { t: "cmyk", v: [c.cyan, c.magenta, c.yellow, c.black] };
+    if (t === "RGBColor") return { t: "rgb", v: [c.red, c.green, c.blue] };
+    if (t === "GrayColor") return { t: "gray", v: [c.gray] };
+  } catch (e2) { return null; }
+  return null;
+}
+
+// 两个颜色是否"相同"(容差 EPS: 各分量差 <= EPS)
+//   v0.2: 真机上色板色与对象色可能有微小浮点差, 精确相等会漏判 ⇒ 改用容差。
+var PF_COLOR_EPS = 0.5;   // 分量容差(0~100 制), 0.5 足以吸收浮点噪声又不误判相邻色
+
+function pfColorSame(a, b) {
+  var pa = pfColorParts(a), pb = pfColorParts(b);
+  if (!pa || !pb) return false;
+  if (pa.t !== pb.t) return false;
+  if (pa.v.length !== pb.v.length) return false;
+  for (var i = 0; i < pa.v.length; i++) {
+    if (Math.abs(pa.v[i] - pb.v[i]) > PF_COLOR_EPS) return false;
+  }
+  return true;
+}
+
+// v10.43(审查 P3-2): 左侧已分解版的 pfColorSame —— 供 pfSwatchUsed 的 usedColors 循环
+//   复用同一份分解结果。原 pfColorSame(a, b) 每次都对两侧现分解, 而色板色是固定的 ⇒
+//   N 次比对就白解析 N 遍。原函数保留(其余调用点不变)。
+function pfColorSameParts(pa, b) {
+  if (!pa) return false;
+  var pb = pfColorParts(b);
+  if (!pb) return false;
+  if (pa.t !== pb.t) return false;
+  if (pa.v.length !== pb.v.length) return false;
+  for (var i = 0; i < pa.v.length; i++) {
+    if (Math.abs(pa.v[i] - pb.v[i]) > PF_COLOR_EPS) return false;
+  }
+  return true;
+}
+
+// 色板 -> 判断"是否在用"
+//   v0.2 重构: 由"键字符串精确相等"改为 **名字集合 + 颜色容差列表** 双路判定。
+//     ① 专色: 色板名 或 spot.name 命中 usedNames 即算在用
+//     ② 印刷色(CMYK/RGB/Gray): 与 usedColors 里任一颜色"容差相同"即算在用
+//   原因(真机 bug): 原实现的 pfRound 精确键在浮点尾数差异下漏判, 导致在用色板被列进删除清单。
+function pfSwatchUsed(sw, usedNames, usedColors) {
+  try { if (pfIsSystemSwatch(sw)) return true; } catch (eS) {}
+  var nm = "";
+  try { nm = sw.name; } catch (e0) { return true; }   // 读不到名字: 保守当在用(不误删)
+  var tn = "";
+  try { tn = sw.color.typename; } catch (e1) {}
+  // ① 专色: 名字匹配
+  if (tn === "SpotColor") {
+    if (usedNames["SPOTNAME:" + nm]) return true;
+    try {
+      var sn = sw.color.spot && sw.color.spot.name;
+      if (sn && usedNames["SPOTNAME:" + sn]) return true;
+    } catch (e2) {}
+    return false;
+  }
+  // 图案色: 按名字(与 pfUsedColorKeys ④ 的登记一致)
+  if (tn === "PatternColor") {
+    try {
+      var pn = sw.color.pattern && sw.color.pattern.name;
+      if (pn && usedNames["PATT:" + pn]) return true;
+    } catch (e3) {}
+    return false;
+  }
+  // 渐变/其它: 名字兜底(无法安全按色值判)
+  if (tn !== "CMYKColor" && tn !== "RGBColor" && tn !== "GrayColor") return true;
+  // ② 印刷色: 容差匹配颜色列表
+  var sc = null;
+  try { sc = sw.color; } catch (e4) { return true; }
+  // v10.43(审查 P3-2): 分解结果外提到循环外 —— sw.color 是固定的, 原实现每次循环
+  //   都经 pfColorSame 重新分解一遍, usedColors 有几百个时就白解析几百遍。
+  var paSc = null;
+  try { paSc = pfColorParts(sc); } catch (e5) { paSc = null; }
+  if (!paSc) return false;   // 解析不了: 不判在用(与原 pfColorSame 返 false 的口径一致)
+  for (var i = 0; i < usedColors.length; i++) {
+    if (pfColorSameParts(paSc, usedColors[i])) return true;
+  }
+  return false;
+}
+
+// 收集整个文档"实际被使用"的东西 —— 含隐藏/锁定(见上方口径说明)
+//   返回 { names: {key:1}, colors: [颜色对象...] }
+//   v0.2 重构: 颜色改为**列表**而非字符串键 —— 供 pfColorSame 做容差匹配。
+//   v0.2 同时补全遍历盲区(真机 bug): 原实现只走 PathItem 的填充/描边, 漏掉:
+//     - CompoundPathItem 自身的填充/描边(原代码下钻 pathItems, 但复合路径的**整体**色在其自身)
+//     - GroupItem 的填充(**组可带填色**, 是 AI 里极常见的用法)
+//     - RasterItem / PlacedItem(位图对象的填充/描边属性同样存在)
+//     - TextFrame 段落级颜色(characterAttributes 之外, 整帧默认色)
+//     - 符号实例(路径经 symbol 引用, 其颜色需另行展开)
+//   一律 try/catch 包住, 读不到的属性跳过(宁可少收、不可抛错中断整轮扫描)。
+//   v0.5 扩展(雪糕需求): 由"只判色板"升级为"颜色 + 渐变 + 图案"三类共用一套收集。
+//     新增登记: GRAD:<name>(被对象引用的渐变)、PATT:<name>(被对象引用的图案)。
+//     ⚠ 旧 v0.2 把图案"整类按在用放行"是**保守兜底**(当时图案内部色无法可靠遍历);
+//       本次改为**精确认定** —— 只有真正被对象引用的图案才算在用, 未被引用者可删。
+function pfUsedColorKeys(doc) {
+  var names = {};      // 专色名(SPOTNAME:) / 图案引用(PATT:) / 渐变引用(GRAD:)
+  var colors = [];     // 印刷色对象列表(容差匹配用)
+  var colorSeen = 0;   // 防止颜色列表爆炸(大文档)
+  // v0.5.2: 成功遍历到的**顶层对象数**(不含子层下钻的重复计数)。
+  //   用途: 区分"真·空文档/空画板"(objCount=0) 与"遍历出错"(有对象却一个色都收不到)。
+  //   空画板时该值为 0 ⇒ 安全闸放行(本就该删掉所有非系统色板);
+  //   有对象却 0 色 ⇒ 判定异常, 拒绝删除(保住原安全闸意图)。
+  var objCount = 0;
+  // v10.28: 颜色收集触顶标志(4000 上限) —— 触顶时删除动作拒绝执行,
+  //   防止"没收集到的颜色对应色板被误判为未使用"而误删(审计疑似4)。
+  var colorTruncated = false;
+
+  // v0.5: 按名字登记一个渐变/图案引用(供"未使用渐变/图案"判定)
+  function markGradRef(g) {
+    try { if (g && g.name) names["GRAD:" + g.name] = 1; } catch (eGR) {}
+  }
+  function markPattRef(p) {
+    try { if (p && p.name) names["PATT:" + p.name] = 1; } catch (ePR) {}
+  }
+
+  function mark(c) {
+    if (!c) return;
+    var t = "";
+    try { t = c.typename; } catch (e) { return; }
+    if (t === "SpotColor") {
+      try { if (c.spot && c.spot.name) names["SPOTNAME:" + c.spot.name] = 1; } catch (eSP) {}
+      return;
+    }
+    if (t === "PatternColor") {
+      // v0.5: 图案色被对象引用 ⇒ 该图案在用(记 PATT:name)
+      try { markPattRef(c.pattern); } catch (ePT) {}
+      return;
+    }
+    if (t === "GradientColor") {
+      // v0.5: 渐变被对象引用 ⇒ 该渐变在用(记 GRAD:name)
+      try { markGradRef(c.gradient); } catch (eGD0) {}
+      // 渐变: 展开色标(色标里的专色/印刷色都要保住)
+      try {
+        var stops = c.gradient.gradientStops;
+        for (var s = 0; s < stops.length; s++) { try { mark(stops[s].color); } catch (eGs) {} }
+      } catch (eG) {}
+      return;
+    }
+    if (t === "CMYKColor" || t === "RGBColor" || t === "GrayColor") {
+      if (colorSeen < 4000) { colors.push(c); colorSeen++; } else { colorTruncated = true; }
+      return;
+    }
+    // NoColor / 其它: 不需要登记
+  }
+
+  // 逐对象收色: 覆盖 PathItem / CompoundPathItem / GroupItem / RasterItem / PlacedItem
+  function collectItem(it, depth, countTop) {
+    // v10.60(审查 2.2): 深度上限 20 -> 64, 与主扫描(visitItem / walkLayer / walkLayerHidden)
+    //   同档。旧值 20 会让"第 21 层以上组内的颜色"登记不到 ⇒ 仍在用的色板可能被判
+    //   "未使用"而误删(主扫描那边却统计得到 ⇒ 两侧对不上账)。统一 64 后同深同查。
+    if (depth > 64) return;
+    var tn = "";
+    try { tn = it.typename; } catch (eT) { return; }
+    // v0.5.2: 只统计"顶层"对象(画板/图层直接持有的), 子层下钻不重复计数
+    if (countTop) objCount++;
+
+    // 填充 / 描边(这些属性对 Path/CompoundPath/Group/Raster/Placed 大多可用)
+    // v10.33: filled 口径与 scanPathInk 统一为 `!== false`(审查 v10.32 第 3 条) ——
+    //   原先要求 `=== true`, 对 filled 读不到(=undefined)的对象**不登记**其填充色;
+    //   而 scanPathInk 那边是"只排除明确 false"⇒ 会统计其油墨。两侧不一致时,
+    //   理论上会出现"对象有油墨、但它用的色板被判未使用" ⇒ 色板被误删。
+    //   统一成"只排除明确 false"(更保守: 宁可多留色板, 不可误删)。
+    try { if (it.filled !== false) mark(it.fillColor); } catch (e1) {}
+    try { if (it.stroked === true) mark(it.strokeColor); } catch (e2) {}
+
+    // v0.5: 图案填充的"图案"句柄有时只能从 fillColor.pattern 读 —— 已在 mark() 内处理;
+    //   另补一层 .pattern 直读(个别对象 filled 标志不可靠时兜底)
+    try { if (it.fillColor && it.fillColor.typename === "PatternColor") markPattRef(it.fillColor.pattern); } catch (eP1) {}
+    try { if (it.strokeColor && it.strokeColor.typename === "PatternColor") markPattRef(it.strokeColor.pattern); } catch (eP2) {}
+
+    // 下钻子对象
+    try {
+      if (tn === "GroupItem") {
+        var gi = it.pageItems;
+        for (var g = 0; g < gi.length; g++) collectItem(gi[g], depth + 1, false);
+      } else if (tn === "CompoundPathItem") {
+        var ci = it.pathItems;
+        for (var c2 = 0; c2 < ci.length; c2++) collectItem(ci[c2], depth + 1, false);
+      }
+    } catch (eD) {}
+  }
+
+  function walkLayers(lyrs, depth) {
+    // v10.60(审查 2.2): 同 collectItem —— 20 -> 64, 与主扫描统一。
+    if (depth > 64) return;
+    for (var i = 0; i < lyrs.length; i++) {
+      var ly = lyrs[i];
+      try {
+        var items = ly.pageItems;
+        for (var j = 0; j < items.length; j++) collectItem(items[j], 0, true);
+      } catch (eL) {}
+      try { var subs = ly.layers; if (subs && subs.length) walkLayers(subs, depth + 1); } catch (eL2) {}
+    }
+  }
+  walkLayers(doc.layers, 0);
+
+  // ② 文字: 字符级 + 整帧默认色(含隐藏/锁定 —— 保守不误删)
+  //   v0.5.2: 文字帧也算"对象"计入 objCount(空画板若含文本框, 不该被判成"遍历出错")
+  try {
+    var tfs = doc.textFrames;
+    for (var ti = 0; ti < tfs.length; ti++) {
+      var tf = tfs[ti];
+      objCount++;
+      // 整帧默认字符属性(段落/整帧色常落在这里)
+      try {
+        var tr = tf.textRange;
+        try { var ca = tr.characterAttributes; mark(ca.fillColor); mark(ca.strokeColor); } catch (eCa) {}
+      } catch (eTr) {}
+      // 帧对象自身的填充/描边(文本框底纹/边框)
+      // v10.33: 同 scanPathInk 口径统一为 `!== false`(审查 v10.32 第 3 条)
+      try { if (tf.filled !== false) mark(tf.fillColor); } catch (eTf1) {}
+      try { if (tf.stroked === true) mark(tf.strokeColor); } catch (eTf2) {}
+    }
+  } catch (eTX) {}
+
+  // ③ ⚠ v0.5 移除: 原 v0.1 起把"文档里存在的**所有**渐变"整类按在用放行
+  //   (遍历 doc.gradients 把每个渐变的色标色都 mark 一遍) —— 这会让"未使用渐变"
+  //   永远无法被识别。现改为: 只登记**被对象引用**的渐变(在上方 mark() 里做),
+  //   未被任何对象引用的渐变即可被识别为"未使用"。
+  //   ⚠ 但有个例外必须保留: 渐变色标里的**专色/印刷色**仍需保留其对应色板 ——
+  //   实际已被上方的 mark(GradientColor) 分支覆盖(它展开色标), 故此处无需重复。
+
+  // ④ ⚠ v0.5 移除: 原 v0.2 把 doc.patterns 整类按在用放行(保守兜底)。
+  //   现改为: 只登记**被对象引用**的图案(在上方 mark(PatternColor) 里做),
+  //   未被任何对象引用的图案即可被识别为"未使用"。
+
+  // ⑤ ⚠ v0.5.1 移除(真机 bug —— 空画板却显示 11 个色板全在用):
+  //   原实现无条件遍历 doc.symbols(文档符号库), 把**符号定义内**的路径颜色也登记为"在用"。
+  //   但每个新建的 AI 文档都自带符号库(网页图标/箭头等), 这些符号路径用的正是
+  //   默认 CMYK 色值(黑/红/黄/绿/蓝…) ⇒ 色板表里同色值的默认色板全部命中,
+  //   产生"空画板却 11 个色板全在用"的假象(系统 4 项 + 默认 7 个印刷色)。
+  //   连带影响: 符号里的渐变/图案也被登记 ⇒ v0.5 的"未使用渐变/图案"同样删不掉。
+  //   ⚠ 取舍(用户选定「忽略符号」): 只统计**画板上的实际对象**, 不再看符号定义。
+  //     代价: 若某文档确实只有一个"未放置的符号"引用某专色, 该专色会被判未使用。
+  //     但符号未被放置 = 输出里不会出现它 ⇒ 回收其专属颜色是合理的。
+  //     且符号库是**文档级默认携带**的, 把它当"在用"几乎必然误判 —— 故必须忽略。
+
+  return { names: names, colors: colors, objCount: objCount, colorTruncated: colorTruncated };
+}
+
+// 统计未使用色板(只读, 不修改文档)
+//   返回 { total, used, unused, truncated }
+//   v10.46(审查 P2-2): 删死字段 —— unusedNames/usedNames/noText/colorCount/nameCount
+//     前端卡⑧只读 total/used/unused/truncated(五个都没接线); names 收集连带
+//     NAME_CAP 逻辑一并简化, truncated 改按"未使用总数 > NAME_CAP"判(等价原语义)。
+function pfSwatchScan(doc, usedPre) {
+  var out = { total: 0, used: 0, unused: 0, truncated: false };
+  try {
+    // v10.28: 加参 usedPre 复用调用方已收集的 pfUsedColorKeys 结果, 消除同一轮内双调(审计疑似2)
+    var used = usedPre || pfUsedColorKeys(doc);
+    var sws = doc.swatches;
+    out.total = sws.length;
+    var NAME_CAP = 12;   // 未使用清单的截断判据(前端只列前 N 个的旧口径, 现仅用于 truncated)
+    for (var i = 0; i < sws.length; i++) {
+      var sw = sws[i], nm = "", isUsed = false;
+      try { nm = sw.name; } catch (eN) { continue; }
+      // v0.2: 传入 idx —— 系统四项位置兜底(名字读失败时仍能保住)
+      try { if (pfIsSystemSwatch(sw, i)) isUsed = true; } catch (eSys) {}
+      if (!isUsed) isUsed = pfSwatchUsed(sw, used.names, used.colors);
+      if (isUsed) out.used++;
+      else out.unused++;
+    }
+    if (out.unused > NAME_CAP) out.truncated = true;
+  } catch (e) {}
+  return out;
+}
+
+// ============================================================
+// v0.5: 未使用渐变 / 未使用图案 — 统计与清除(雪糕需求)
+// ------------------------------------------------------------
+// 判定: 一个渐变/图案若**没有被任何对象引用**, 即为"未使用"。
+//   引用来源(names 里的 GRAD:name / PATT:name)由 pfUsedColorKeys 统一收集:
+//     对象填充/描边为 GradientColor ⇒ 记 GRAD
+//     对象填充/描边为 PatternColor  ⇒ 记 PATT
+//     (含组/复合路径/文字/符号内的对象)
+//   ⚠ 与色板不同: 渐变/图案**没有系统保留项**, 不做下标兜底。
+//   ⚠ 安全: 与色板同理设"收集闸" —— 若连一个颜色都没收集到(遍历异常),
+//     拒绝删除, 防把整库渐变/图案清空。
+//   ⚠ 命名: "[无]"等非渐变项不会出现在 doc.gradients 里; 但个别文档存在
+//     不可删的内建项, 删除失败一律计入 failed 如实回报, 不静默跳过。
+// ============================================================
+
+// 统计未使用渐变(只读)
+//   返回 { total, used, unused, truncated }  (v10.46 审查 P2-2: 清单字段已删)
+function pfGradientScan(doc, used) {
+  var out = { total: 0, used: 0, unused: 0, truncated: false };
+  try {
+    if (!used) used = pfUsedColorKeys(doc);
+    var gs = doc.gradients;
+    out.total = gs.length;
+    var NAME_CAP = 12;   // v10.46(审查 P2-2): 仅作 truncated 判据(清单字段已删)
+    for (var i = 0; i < gs.length; i++) {
+      var nm = "", isUsed = false;
+      try { nm = gs[i].name; } catch (eN) { continue; }
+      try { if (used.names["GRAD:" + nm]) isUsed = true; } catch (eU) {}
+      if (isUsed) out.used++;
+      else out.unused++;
+    }
+    if (out.unused > NAME_CAP) out.truncated = true;
+  } catch (e) {}
+  return out;
+}
+
+// 统计未使用图案(只读)
+function pfPatternScan(doc, used) {
+  var out = { total: 0, used: 0, unused: 0, truncated: false };
+  try {
+    if (!used) used = pfUsedColorKeys(doc);
+    var pts = doc.patterns;
+    out.total = pts.length;
+    var NAME_CAP = 12;
+    for (var i = 0; i < pts.length; i++) {
+      var nm = "", isUsed = false;
+      try { nm = pts[i].name; } catch (eN) { continue; }
+      try { if (used.names["PATT:" + nm]) isUsed = true; } catch (eU) {}
+      if (isUsed) out.used++;
+      else out.unused++;
+    }
+    if (out.unused > NAME_CAP) out.truncated = true;
+  } catch (e) {}
+  return out;
+}
+
+// 删除未使用渐变 + 未使用图案(破坏性动作, 按钮触发)
+//   返回 { ok, grad:{before,after,removed,removedNames,failed,failedNames},
+//          patt:{...}, message }
+//   ⚠ 与 pfClearUnusedSwatches 共用 pfUsedColorKeys 判定 —— "扫出几个就删几个"。
+function pfClearUnusedGradPattern() {
+  var res = { ok: false };
+  try {
+    if (app.documents.length === 0) { res.error = "当前没有打开的文档，请先打开一个 AI 文件。"; return pfReturn(res); }
+    var doc = app.activeDocument;
+    // v10.46(审查 P2-1): 优先复用同轮串联里 pfClearUnusedSwatches 已收集的结果
+    //   (两道安全闸在它那边已过; 删色板不改变在用颜色集合 ⇒ 判定等效)。
+    //   单独调用(无缓存)时照旧自收集。
+    var used = __pfUsedCache || pfUsedColorKeys(doc);
+    // v10.60(审查 2.6): 一次性消费 —— 读完立即清空, 免得"上一轮的缓存"跨轮串味。
+    __pfUsedCache = null;
+
+    // 安全闸(与色板一致): 名字与颜色都空 ⇒ 遍历异常, 拒绝删除
+    //   v0.5.2: 用 objCount 区分"真·空文档/空画板"(objCount=0 ⇒ 放行) 与"遍历出错"(有对象却 0 色 ⇒ 拒绝)
+    var nameCnt0 = 0;
+    for (var nk0 in used.names) { if (used.names.hasOwnProperty(nk0)) nameCnt0++; }
+    var objCnt0 = (typeof used.objCount === "number") ? used.objCount : -1;
+    if (objCnt0 !== 0 && nameCnt0 === 0 && used.colors.length === 0) {
+      res.ok = false;
+      res.error = "安全闸触发(保护机制正常拦截)：未能在文档中收集到任何在用颜色(可能是不兼容的文档状态)。为保证安全，本次不执行删除。请把此情况反馈给开发者。";
+      return pfReturn(res);
+    }
+
+    // v10.28: 颜色收集触顶(4000 上限) ⇒ 未收集到的颜色对应色板可能被误判"未使用", 拒绝删除
+    if (used.colorTruncated) {
+      res.ok = false;
+      res.error = "文档颜色数量超过收集上限(4000)，为避免误删，本次不执行删除。";
+      return pfReturn(res);
+    }
+
+    // ---- 渐变 ----
+    var gRes = { before: 0, after: 0, removed: 0, removedNames: [], failed: 0, failedNames: [] };
+    try {
+      var gs0 = doc.gradients;
+      gRes.before = gs0.length;
+      var gsArr = [];
+      for (var gi = 0; gi < gs0.length; gi++) gsArr.push(gs0[gi]);
+      // 倒序删, 避免索引漂移
+      for (var gj = gsArr.length - 1; gj >= 0; gj--) {
+        var g = gsArr[gj], gnm = "";
+        try { gnm = g.name; } catch (eGN) { gRes.failed++; gRes.failedNames.push("(未命名)"); continue; }
+        if (used.names["GRAD:" + gnm]) continue;   // 在用, 保留
+        try { g.remove(); gRes.removed++; gRes.removedNames.push(gnm); }
+        catch (eGR) { gRes.failed++; gRes.failedNames.push(gnm); }
+      }
+      try { gRes.after = doc.gradients.length; } catch (eGA) {}
+    } catch (eGX) { gRes.failed++; gRes.failedNames.push("(渐变读取失败)"); }
+
+    // ---- 图案 ----
+    var pRes = { before: 0, after: 0, removed: 0, removedNames: [], failed: 0, failedNames: [] };
+    try {
+      var pts0 = doc.patterns;
+      pRes.before = pts0.length;
+      var ptsArr = [];
+      for (var pi = 0; pi < pts0.length; pi++) ptsArr.push(pts0[pi]);
+      for (var pj = ptsArr.length - 1; pj >= 0; pj--) {
+        var p = ptsArr[pj], pnm = "";
+        try { pnm = p.name; } catch (ePN) { pRes.failed++; pRes.failedNames.push("(未命名)"); continue; }
+        if (used.names["PATT:" + pnm]) continue;   // 在用, 保留
+        try { p.remove(); pRes.removed++; pRes.removedNames.push(pnm); }
+        catch (ePR) { pRes.failed++; pRes.failedNames.push(pnm); }
+      }
+      try { pRes.after = doc.patterns.length; } catch (ePA) {}
+    } catch (ePX) { pRes.failed++; pRes.failedNames.push("(图案读取失败)"); }
+
+    res.ok = true;
+    res.grad = gRes;
+    res.patt = pRes;
+    var parts = [];
+    parts.push("渐变: " + (gRes.removed > 0 ? "删除 " + gRes.removed + " 个（剩余 " + gRes.after + "）" : "无可删除（当前 " + gRes.after + " 个全部在用）")
+      + (gRes.failed > 0 ? "，失败 " + gRes.failed + " 个：" + gRes.failedNames.join("、") : ""));
+    parts.push("图案: " + (pRes.removed > 0 ? "删除 " + pRes.removed + " 个（剩余 " + pRes.after + "）" : "无可删除（当前 " + pRes.after + " 个全部在用）")
+      + (pRes.failed > 0 ? "，失败 " + pRes.failed + " 个：" + pRes.failedNames.join("、") : ""));
+    res.message = parts.join("；") + "。";
+  } catch (err) {
+    res.ok = false;
+    res.error = "清除未使用渐变/图案失败: " + String(err);
+  }
+  return pfReturn(res);
+}
+
+// ============================================================
+// v0.5.1: 颜色组(swatchGroups)统计与清理(雪糕需求)
+// ------------------------------------------------------------
+// AI 的"颜色组"= 色板面板里那一排可展开的分组(swatchGroups)。
+//   用户选定方案「拆组 + 删空组」:
+//     ① 把组内"未使用"的色板**移出该组**(从组里移除, 不删色板对象本身
+//        —— 色板对象的死活仍由 pfClearUnusedSwatches 按原逻辑判定, 不重复删)
+//     ② 组被移空 ⇒ 删掉这个空组
+//   ⚠ AI 的 DOM 对 swatchGroups 支持较浅且版本差异大, 全程 try/catch 包住:
+//     - 读不到 doc.swatchGroups ⇒ 该项统计为 0, 不影响其它功能(优雅降级)。
+//     - 组的移除 API 在不同版本上名称不一(remove() / swatchGroup.remove()),
+//       失败一律计入 failed 如实回报, 不静默吞掉。
+// ============================================================
+
+// 读到文档的颜色组数组(读不到返回 null —— 调用方据此优雅降级)
+function pfGetSwatchGroups(doc) {
+  try {
+    var g = doc.swatchGroups;
+    if (g === undefined || g === null) return null;
+    return g;
+  } catch (e) { return null; }
+}
+
+// 统计颜色组: { supported, total }
+//   supported=false 表示该版本 AI 不支持 swatchGroups(前端隐藏相关 UI)
+//   ⚠ v0.7.8: 真机诊断(AI 28.0.0) 证实 SwatchGroup **无法读取成员**(swatches 等全 undefined),
+//     故**不再统计"组内未使用色板"**(根本读不到), 只报告颜色组数量。
+function pfSwatchGroupScan(doc, used) {
+  var out = { supported: false, total: 0, unknown: 0, groups: [] };
+  var gs = pfGetSwatchGroups(doc);
+  if (!gs) return out;   // 不支持 ⇒ 直接返回, 不影响其它统计
+  out.supported = true;
+  try {
+    out.total = gs.length;
+  } catch (e) {}
+  return out;
+}
+
+// 颜色组清理 —— v0.7.8: **不再删除任何颜色组**
+//   ⚠ 依据真机诊断(AI 28.0.0): `SwatchGroup` **不暴露任何可读的成员集合属性**
+//     (swatches / swatchGroups / groupItems / members / children / … 全为 undefined,
+//      可枚举属性只有 name / typename / parent; removeSwatch 亦为 undefined)。
+//     也就是说 —— **我们无法得知一个组里到底有没有色板**, 但 `g.remove()` 会
+//     **连带删除组内全部色板**(级联删除)。任何"猜"的空组判定都曾造成不可逆损失:
+//       ❌ v0.7.5: 读不到成员数 ⇒ 当作 0 ⇒ 判空组 ⇒ 删组 ⇒ 色板全没
+//       ❌ v0.7.7: 「试删 + undo」测长度 ⇒ 但 doc.swatches.length 同执行内不刷新 ⇒ 恒判空 ⇒ 色板全没
+//   故本函数**改为只读**: 只报告颜色组数量, **绝不调用 remove()**。
+//   代价: 真·空组也不会被删除(用户已确认接受 —— 安全优先)。
+//   返回 { ok, supported, groupsBefore, removedGroups:0, skipped:true, message }
+//   v10.28: 当前前端未接线(预留) —— 面板没有任何按钮调用本函数, 仅保留作后续扩展。
+function pfClearUnusedSwatchGroups() {
+  var res = { ok: true, supported: false, removedGroups: 0, skipped: true };
+  try {
+    if (app.documents.length === 0) { res.error = "当前没有打开的文档，请先打开一个 AI 文件。"; res.ok = false; return pfReturn(res); }
+    var doc = app.activeDocument;
+    var gs = pfGetSwatchGroups(doc);
+    if (!gs) {
+      res.supported = false;
+      res.message = "颜色组：当前 Illustrator 版本不支持读取颜色组，已跳过。";
+      return pfReturn(res);
+    }
+    res.supported = true;
+    res.groupsBefore = gs.length;
+    try { res.groupsAfter = doc.swatchGroups.length; } catch (eA) { res.groupsAfter = -1; }
+    res.message = "颜色组：已跳过（当前 " + res.groupsBefore + " 个组，均保留）。" +
+      "为避免误删组内色板，本版不再删除任何颜色组。";
+  } catch (err) {
+    res.ok = false;
+    res.error = "读取颜色组失败: " + String(err);
+  }
+  return pfReturn(res);
+}
+
+// 删除未使用色板(破坏性动作, 由按钮触发)
+//   v10.16: 与 pfSwatchScan 共用同一套判定, 保证"扫出几个就删几个"。
+//   ⚠ 文档里还有未转曲文字时**仍执行删除** —— 文字颜色已按字符级读到(见口径②),
+//     不存在"文字专色收不到"的情况; 若读取失败则计入 failed 并如实回报, 不静默跳过。
+function pfClearUnusedSwatches() {
+  var res = { ok: false };
+  try {
+    if (app.documents.length === 0) { res.error = "当前没有打开的文档，请先打开一个 AI 文件。"; return pfReturn(res); }
+    var doc = app.activeDocument;
+    // v10.60(审查 2.6): 进本函数即作废上一轮的轮内缓存 —— 下面若在安全闸处提前 return,
+    //   __pfUsedCache 会停在上一次的值; 而执行链的下一棒(pfClearUnusedGradPattern)仍会读它,
+    //   拿旧快照删渐变/图案 ⇒ 可能误删。本函数恒是每轮执行的"第一个动作", 在此清空最稳妥。
+    __pfUsedCache = null;
+    var used = pfUsedColorKeys(doc);
+
+    // v0.2 安全闸(真机 bug 后新增): 若**名字和颜色都一个没收集到**, 说明遍历/读取出了问题
+    //   (语言不匹配、属性名变化、权限等), 此时删除会把全部色板误删 ⇒ 直接拒绝执行。
+    //   宁可"今天删不了", 也不能"把文档色板清空"。
+    //   ⚠ v0.5.2 修复(真机 bug —— 空画板按了不删色板):
+    //     原判定把"空画板"(文档里本就没有任何对象 ⇒ 理应收不到任何在用色) 与
+    //     "遍历出错"(有对象却读不到色) 混为一谈, 导致空画板时安全闸误触发、拒绝删除。
+    //     现引入 objCount(成功遍历到的对象数) 区分:
+    //       objCount === 0  ⇒ 真·空文档/空画板, **放行**(本就该删掉所有非系统色板);
+    //       objCount  > 0   且 0 色 0 名 ⇒ 判定遍历异常, 拒绝删除(保住原保护意图);
+    //       objCount  < 0   ⇒ 旧版数据(未提供该字段), 保守拒绝。
+    var nameCnt0 = 0;
+    for (var nk0 in used.names) { if (used.names.hasOwnProperty(nk0)) nameCnt0++; }
+    var objCnt0 = (typeof used.objCount === "number") ? used.objCount : -1;
+    if (objCnt0 !== 0 && nameCnt0 === 0 && used.colors.length === 0) {
+      res.ok = false;
+      res.error = "安全闸触发(保护机制正常拦截)：未能在文档中收集到任何在用颜色(可能是不兼容的文档状态)。为保证安全，本次不执行删除。请把此情况反馈给开发者。";
+      return pfReturn(res);
+    }
+
+    // v10.28: 颜色收集触顶(4000 上限) ⇒ 未收集到的颜色对应色板可能被误判"未使用", 拒绝删除
+    if (used.colorTruncated) {
+      res.ok = false;
+      res.error = "文档颜色数量超过收集上限(4000)，为避免误删，本次不执行删除。";
+      return pfReturn(res);
+    }
+
+    // v10.46(审查 P2-1): 两道闸都过了 ⇒ 本次确实要删, 把收集结果存进轮内缓存,
+    //   供同一轮串联的 pfClearUnusedGradPattern 复用(不再二次全文档遍历)
+    __pfUsedCache = used;
+
+    var before = 0;
+    try { before = doc.swatches.length; } catch (eB) {}
+
+    // 先快照色板引用(倒序删, 避免索引漂移)
+    var sws = [];
+    try {
+      var cur = doc.swatches;
+      for (var i = 0; i < cur.length; i++) sws.push(cur[i]);
+    } catch (eS) {
+      res.error = "读取色板失败: " + String(eS);
+      return pfReturn(res);
+    }
+
+    var removed = [], failed = [], kept = 0;
+    // v0.2: pfClearUnusedSwatches 与 pfSwatchScan 共用同一判定(名字集合 + 颜色容差列表)
+    for (var j = sws.length - 1; j >= 0; j--) {
+      var sw = sws[j], nm = "";
+      try { nm = sw.name; } catch (eN) { failed.push("(未命名)"); continue; }
+      // v0.2: idx 传原始下标 —— 系统四项位置兜底
+      var isS = false;
+      try { isS = pfIsSystemSwatch(sw, j); } catch (eSys) {}
+      if (isS || pfSwatchUsed(sw, used.names, used.colors)) { kept++; continue; }
+      try { sw.remove(); removed.push(nm); }
+      catch (eR) { failed.push(nm); }
+    }
+
+    var after = 0;
+    try { after = doc.swatches.length; } catch (eA) {}
+
+    res.ok = true;
+    res.before = before;
+    res.after = after;
+    res.removed = removed.length;
+    res.removedNames = removed;
+    res.failed = failed.length;
+    res.failedNames = failed;
+    res.kept = kept;
+    res.message = (removed.length > 0
+      ? "已删除未使用色板 " + removed.length + " 个（剩余 " + after + " 个）"
+      : "未发现可删除的未使用色板（当前 " + after + " 个全部在用）") +
+      (failed.length > 0 ? "，失败 " + failed.length + " 个：" + failed.join("、") + "。" : "。");
+  } catch (err) {
+    res.ok = false;
+    res.error = "清除未使用色板失败: " + String(err);
+  }
+  return pfReturn(res);
+}
+
 // ============================================================
 // 一键操作: 按需解锁/显示图层(含子图层)
 // unlockAll=true 时解锁; showAll=true 时显示; 可单独或同时
@@ -1358,19 +2225,39 @@ function pfUnlockLayer(layer, unlockAll, showAll) {
 // 修 bug: 旧逻辑只看文字所在图层,漏掉两类真实阻挡——
 //   1) 对象自身被 Ctrl+2 锁定(pageItem.locked,与图层锁定无关)
 //   2) 文字在被锁定的组(groupItem)里,或对象被 Ctrl+3 隐藏
-// 返回 {reason:"hidden"|"locked", node:阻挡节点},便于按勾选状态精确解除
-// ============================================================
+// 返回 {reason:"hidden"|"locked", node:阻挡节点, reasons:{...}, locked:bool, hidden:bool}
+// v10.35(审查 #6): 原实现命中即返回**单一**原因(hidden 判在 locked 之前) —— 同一节点
+//   既隐藏又锁定时只报 hidden, 调用方若只认 locked(如叠印的"其中锁定 N 处")就会漏计。
+//   现补 reasons/locked/hidden 三个字段**并列上报**, reason/node 保留原语义(首个命中,
+//   供 pfClearBlock 精确解除)—— 旧调用点一字不改, 新调用点可用 locked 布尔。
+// ⚠ v10.36 复核修正(审查 v10.35 指出): 这是**抽象改善, 不是实锤修复** ——
+//   在当前扫描路径下 hidden 维度**不可达**: visitItem 对隐藏组(1067 行)与自身隐藏对象
+//   (1148 行)都是**整支 return**, walkLayer 对隐藏图层(1334 行)也整支跳过 ⇒ 能走到
+//   pfBlockInfo 调用的对象必然自身可见 + 祖先可见 + 所在图层可见, 故 fHidden 恒假,
+//   新增的 hidden 字段在当前路径下**不改变任何结果**(locked 维度原代码已覆盖)。
+//   保留它的价值 = 为"将来放宽剪枝(改成不剪枝隐藏组、逐项判 pfBlockInfo)"留好口子;
+//   届时这个字段会立刻生效。**但不要因此就去掉上面的剪枝** —— 剪枝是性能根基。
 function pfBlockInfo(item) {
   var p = item, guard = 0;
+  var fLocked = false, fHidden = false, firstNode = null, firstReason = null;
   while (p && guard++ < 40) {
     var tn = "";
     try { tn = p.typename; } catch (et) { break; }
     if (tn === "Document") break;
-    try { if (p.visible === false || p.hidden === true) return { reason: "hidden", node: p }; } catch (e) {}
-    try { if (p.locked === true) return { reason: "locked", node: p }; } catch (e) {}
+    var isH = false, isL = false;
+    try { isH = (p.visible === false || p.hidden === true); } catch (e) {}
+    try { isL = (p.locked === true); } catch (e) {}
+    if (isH || isL) {
+      if (isH) fHidden = true;
+      if (isL) fLocked = true;
+      // 首个命中节点 = 离对象最近的那个, 保留原 reason/node 语义(pfClearBlock 由它解除)
+      if (!firstNode) { firstNode = p; firstReason = isH ? "hidden" : "locked"; }
+    }
     try { p = p.parent; } catch (ep) { break; }
   }
-  return null;
+  if (!firstNode) return null;
+  return { reason: firstReason, node: firstNode, locked: fLocked, hidden: fHidden,
+           reasons: { locked: fLocked, hidden: fHidden } };
 }
 
 // 解除单个阻挡节点(Layer 用 visible,对象用 hidden);成功返回 true
@@ -1427,11 +2314,10 @@ function pfClearOverprint(unlockAll) {
     }
 
     // 1) 文字: 帧级读法(与检查端同一个 characterAttributes,粒度一致)
-    var tfs = doc.textFrames;
-    for (var i = tfs.length - 1; i >= 0; i--) {
-      var tf = tfs[i];
+    //   v10.46(审查 P1-1): 循环体抽成 pfClrOvpFrame —— 符号定义源内的文字帧复用同一套
+    function pfClrOvpFrame(tf) {
       if (uAll) unlocked += pfUnlockItem(tf);
-      if (pfBlockInfo(tf)) { skipped++; continue; }
+      if (pfBlockInfo(tf)) { skipped++; return; }
       try {
         var ca = tf.textRange.characterAttributes;
         if (pfCharOvpFill(ca) || pfCharOvpStroke(ca)) {
@@ -1441,6 +2327,8 @@ function pfClearOverprint(unlockAll) {
         }
       } catch (eT) { failed++; }
     }
+    var tfs = doc.textFrames;
+    for (var i = tfs.length - 1; i >= 0; i--) pfClrOvpFrame(tfs[i]);
 
     // 2) 图形: PathItem 与 CompoundPathItem 各一遍(两个集合互不重复;
     //    即便某个内层路径被两处扫到,第一次置 false 后第二次已读不到 true ⇒ 不会重复计数)
@@ -1456,7 +2344,59 @@ function pfClearOverprint(unlockAll) {
       } catch (eP) { failed++; }
     }
     try { var ps = doc.pathItems; for (var j = ps.length - 1; j >= 0; j--) pfClrPath(ps[j]); } catch (ePS) {}
+    // ⚠ v10.53(审查 A2): 这里喂的是 CompoundPathItem **自身**, 而检查端读的是它的
+    //   pathItems[0]、符号下钻内又是逐个组件 —— 口径不同, 待真机验证后统一(见卡⑦ 检查端注释)。
     try { var cps = doc.compoundPathItems; for (var k = cps.length - 1; k >= 0; k--) pfClrPath(cps[k]); } catch (eCPS) {}
+
+    // 3) v10.46(审查 P1-1): 符号定义源内的对象(文字帧 + 路径)下钻清除。
+    //    根因: 检查端 visitItem 的 SymbolItem 分支会下钻符号定义源, 符号内的文字/路径
+    //    进入叠印统计; 而本函数原先只走 doc.textFrames / doc.pathItems 等**文档级**扁平
+    //    集合(不含符号内) ⇒ "扫出 N 处 / 清完还剩 N 处"(雪糕视角: 点了没反应)。
+    //    口径与检查端对齐: 隐藏/锁定的符号**实例**跳过(pfBlockInfo 判定, 隐藏实例
+    //    检查端也整收不下钻); 定义源内对象各自的阻挡由 pfClrOvpFrame / pfClrPath
+    //    内部的 pfBlockInfo 判定, 不在此重复。
+    //    ⚠ 符号实例集合是文档级全集(含组内实例); 定义源不可访问时静默跳过(只统计)。
+    function pfClrOvpIn(container, depth) {
+      if (depth > 8) return;   // 符号内再套符号的防呆上限(检查端 SymbolItem 分支同款思路)
+      var kids = null;
+      try { kids = container.pageItems; } catch (eK) { return; }
+      for (var ci = 0; ci < kids.length; ci++) {
+        var kIt = kids[ci], kTn = "";
+        try { kTn = kIt.typename; } catch (eKt) {}
+        if (kTn === "GroupItem") { pfClrOvpIn(kIt, depth + 1); continue; }
+        if (kTn === "CompoundPathItem") {
+          // ⚠ v10.53(审查 A2): 符号下钻内是**逐个组件**处理 —— 与文档级循环的"复合路径
+          //   自身"、检查端的 pathItems[0] 三处口径不同, 待真机验证后统一(见卡⑦ 检查端注释)。
+          try {
+            var kps = kIt.pathItems;
+            for (var kp = 0; kp < kps.length; kp++) pfClrPath(kps[kp]);
+          } catch (eKc) {}
+          continue;
+        }
+        if (kTn === "TextFrame") { pfClrOvpFrame(kIt); continue; }
+        if (kTn === "SymbolItem") {
+          if (pfBlockInfo(kIt)) { skipped++; continue; }   // 隐藏/锁定: 跳过
+          var kDef = null; try { kDef = kIt.symbol; } catch (eKd) {}
+          var kSrc = null;
+          if (kDef) { try { kSrc = kDef.item; } catch (eKs) {} if (!kSrc) { try { kSrc = kDef; } catch (eKs2) {} } }
+          if (kSrc && kSrc.pageItems) pfClrOvpIn(kSrc, depth + 1);
+          continue;
+        }
+        pfClrPath(kIt);   // PathItem / MeshItem / PlacedItem 等: 属性读写有 try 兜底, 不匹配的类型不动
+      }
+    }
+    try {
+      var sis = doc.symbolItems;
+      for (var si = 0; si < sis.length; si++) {
+        var sIt = sis[si];
+        if (uAll) unlocked += pfUnlockItem(sIt);
+        if (pfBlockInfo(sIt)) { skipped++; continue; }   // 隐藏/锁定实例: 跳过(与检查端口径一致)
+        var sDef = null; try { sDef = sIt.symbol; } catch (eSd) {}
+        var sSrc = null;
+        if (sDef) { try { sSrc = sDef.item; } catch (eSs) {} if (!sSrc) { try { sSrc = sDef; } catch (eSs2) {} } }
+        if (sSrc && sSrc.pageItems) pfClrOvpIn(sSrc, 0);
+      }
+    } catch (eSym) {}
 
     res.ok = true;
     res.cleared = cleared; res.skipped = skipped; res.failed = failed;
@@ -1487,6 +2427,25 @@ function pfOutlineAll(showAll, unlockAll) {
     var sAll = (showAll === true);
     var uAll = (unlockAll === true);
 
+    // v10.40: 「含显示隐藏」改为**临时显形** —— 转曲要处理隐藏文字, 但跑完必须把文档
+    //   可见性复原。否则「全部清理」会**永久**显示隐藏图层(其转曲步默认勾了"含显示隐藏",
+    //   而 pfUnlockLayer 是全文唯一改图层 visible 的地方), 与卡②「删除隐藏」"隐藏图层
+    //   一律保留"的口径打架 —— 用户看到的是"跑完全部清理, 隐藏图层整支冒出来了, 于是
+    //   再点删隐藏才删得掉, 单独点删隐藏却删不掉"。
+    //   做法: 先记录**原本隐藏的图层**(含子图层, 递归), 跑完 visible=false 逐层还原;
+    //   对象级(Ctrl+3)隐藏文字另在下面收集, 同样还原。只还原**可见性**, 不还原锁定
+    //   —— 「解锁全部」是显式选择, 保持解锁(pfUnlockLayer 的 locked=false 不回滚)。
+    var hiddenLayers = [];
+    function snapHiddenLayers(ls) {
+      for (var sl = 0; sl < ls.length; sl++) {
+        var L = ls[sl], visL = true;
+        try { visL = (L.visible !== false); } catch (eVL) {}
+        if (!visL) hiddenLayers.push(L);
+        try { snapHiddenLayers(L.layers); } catch (eSL) {}
+      }
+    }
+    if (sAll) { try { snapHiddenLayers(doc.layers); } catch (eSHL) {} }
+
     // 1. 按需解锁/显示全部图层(含子图层)
     if (sAll || uAll) {
       var layers = doc.layers;
@@ -1494,10 +2453,13 @@ function pfOutlineAll(showAll, unlockAll) {
     }
 
     // 2. 转曲文字(倒序,避免集合变化导致漏转)
-    var tfs = doc.textFrames;
+    //   v10.46(审查 P1-1): 循环体抽成 pfOutlineOne —— 符号定义源内的文字帧复用同一套
+    //   (阻挡逐层解除 / 临时显形登记 / createOutline 计数)
     var done = 0, skipped = 0, failed = 0, unlocked = 0, unhidden = 0;
-    for (var i = tfs.length - 1; i >= 0; i--) {
-      var tf = tfs[i];
+    // v10.40: 被**临时显形**的对象/组(非图层) —— 跑完 hidden=true 还原(图层级由
+    //   snapHiddenLayers 覆盖, 这里只管对象/组一级)
+    var restoreObjs = [];
+    function pfOutlineOne(tf) {
       var info = null;
       try { info = pfBlockInfo(tf); } catch (e1) {}
       // 按勾选状态逐层解除阻挡: 对象→组→图层可能叠多层锁定/隐藏,
@@ -1506,12 +2468,72 @@ function pfOutlineAll(showAll, unlockAll) {
       while (info && guardB++ < 10) {
         var clearable = (info.reason === "locked" && uAll) || (info.reason === "hidden" && sAll);
         if (!clearable || !pfClearBlock(info.node, info.reason)) break;
-        if (info.reason === "locked") unlocked++; else unhidden++;
+        if (info.reason === "locked") unlocked++;
+        else {
+          unhidden++;
+          try { if (info.node && info.node.typename !== "Layer") restoreObjs.push(info.node); } catch (eRO) {}
+        }
         try { info = pfBlockInfo(tf); } catch (e2) {}
       }
-      if (info) { skipped++; continue; }
+      if (info) { skipped++; return; }
       try { tf.createOutline(); done++; } catch (e) { failed++; }
     }
+    var tfs = doc.textFrames;
+    for (var i = tfs.length - 1; i >= 0; i--) pfOutlineOne(tfs[i]);
+
+    // 2b. v10.46(审查 P1-1): 符号定义源内的文字下钻转曲。
+    //   检查端 visitItem 的 SymbolItem 分支把符号内文字计入"未转曲", 而本函数原先
+    //   只走 doc.textFrames(文档级, 不含符号内) ⇒ "扫出 N 个 / 转完还剩 N 个"。
+    //   口径与检查端对齐: 隐藏/锁定实例按勾选状态逐层解除(与主循环同一套 while),
+    //   仍未解除的跳过; 定义源内的文字帧再走 pfOutlineOne(自身阻挡同样按勾选处理)。
+    function pfOutlineInSym(container, depth) {
+      if (depth > 8) return;   // 符号内再套符号的防呆上限
+      var kids = null;
+      try { kids = container.pageItems; } catch (eK) { return; }
+      for (var ci = 0; ci < kids.length; ci++) {
+        var kIt = kids[ci], kTn = "";
+        try { kTn = kIt.typename; } catch (eKt) {}
+        if (kTn === "TextFrame") { pfOutlineOne(kIt); continue; }
+        if (kTn === "GroupItem") { pfOutlineInSym(kIt, depth + 1); continue; }
+        if (kTn === "SymbolItem") {
+          if (pfBlockInfo(kIt)) { skipped++; continue; }
+          var kDef = null; try { kDef = kIt.symbol; } catch (eKd) {}
+          var kSrc = null;
+          if (kDef) { try { kSrc = kDef.item; } catch (eKs) {} if (!kSrc) { try { kSrc = kDef; } catch (eKs2) {} } }
+          if (kSrc && kSrc.pageItems) pfOutlineInSym(kSrc, depth + 1);
+          continue;
+        }
+        // 复合路径/位图等非文字对象: 无文字可转
+      }
+    }
+    try {
+      var sisO = doc.symbolItems;
+      for (var siO = 0; siO < sisO.length; siO++) {
+        var sItO = sisO[siO];
+        var infoS = null;
+        try { infoS = pfBlockInfo(sItO); } catch (e1s) {}
+        var guardS = 0;
+        while (infoS && guardS++ < 10) {
+          var clearableS = (infoS.reason === "locked" && uAll) || (infoS.reason === "hidden" && sAll);
+          if (!clearableS || !pfClearBlock(infoS.node, infoS.reason)) break;
+          if (infoS.reason === "locked") unlocked++;
+          else {
+            unhidden++;
+            try { if (infoS.node && infoS.node.typename !== "Layer") restoreObjs.push(infoS.node); } catch (eROs) {}
+          }
+          try { infoS = pfBlockInfo(sItO); } catch (e2s) {}
+        }
+        if (infoS) { skipped++; continue; }
+        var sDefO = null; try { sDefO = sItO.symbol; } catch (eSdO) {}
+        var sSrcO = null;
+        if (sDefO) { try { sSrcO = sDefO.item; } catch (eSsO) {} if (!sSrcO) { try { sSrcO = sDefO; } catch (eSsO2) {} } }
+        if (sSrcO && sSrcO.pageItems) pfOutlineInSym(sSrcO, 0);
+      }
+    } catch (eSymO) {}
+
+    // v10.40: 复原可见性(临时显形结束) —— 先对象后图层(互不为祖先/后代, 顺序无关)
+    for (var ro = 0; ro < restoreObjs.length; ro++) { try { restoreObjs[ro].hidden = true; } catch (eRq) {} }
+    for (var rl = 0; rl < hiddenLayers.length; rl++) { try { hiddenLayers[rl].visible = false; } catch (eRl) {} }
 
     res.ok = true;
     res.outlined = done;
@@ -1521,7 +2543,7 @@ function pfOutlineAll(showAll, unlockAll) {
     res.unhidden = unhidden;
     res.message = "已转曲 " + done + " 个文本框" +
       (unlocked > 0 ? "，解除锁定 " + unlocked + " 处" : "") +
-      (unhidden > 0 ? "，取消隐藏 " + unhidden + " 处" : "") +
+      (unhidden > 0 ? "，临时显示 " + unhidden + " 处(已复原可见性)" : "") +
       (skipped > 0 ? "，跳过 " + skipped + " 个(隐藏/锁定，未勾选对应选项)" : "") +
       (failed > 0 ? "，失败 " + failed + " 个" : "") + "。";
   } catch (err) {
@@ -1620,6 +2642,287 @@ function pfEmbedAll() {
   } catch (err) {
     res.ok = false;
     res.error = "嵌入失败: " + String(err);
+  }
+  return pfReturn(res);
+}
+
+// ============================================================
+// v10.14: 叠印规则动作(自 zhiban v10.15~16 同源移植, 供卡⑦分级版「执行勾选项」)。
+//   mode: "white"  -> 清除需处理叠印(纯白 + 彩色; 填充+描边、文字+图形)
+//         "k100"   -> 为单黑对象新增叠印(填充+描边、文字+图形)
+//   lockFirst: true 时先解锁全部图层, 再沿 parent 链解除对象锁定; 隐藏对象一律不碰。
+//   返回 {ok, acted, skipped, failed, unlocked, message}。
+function pfOverprintRule(mode, lockFirst) {
+  var res = { ok: false };
+  try {
+    if (app.documents.length === 0) { res.error = "当前没有打开的文档，请先打开一个 AI 文件。"; return pfReturn(res); }
+    var doc = app.activeDocument;
+    var m = (mode === "k100") ? "k100" : "white";
+    var lf = (lockFirst === true);
+    var acted = 0, skipped = 0, failed = 0, unlocked = 0;
+
+    // 1. 解锁前置(先解锁, 再处理)
+    if (lf) {
+      try {
+        var lys = doc.layers;
+        for (var li = 0; li < lys.length; li++) pfUnlockLayer(lys[li], true, false);
+      } catch (eUL) {}
+    }
+    // 沿 parent 链解除该对象的**锁定**阻挡(解锁前置模式下);隐藏一律不动
+    function pfUnlockItem2(item) {
+      var n = 0, g = 0, info = null;
+      try { info = pfBlockInfo(item); } catch (e0) { return 0; }
+      while (info && info.reason === "locked" && g++ < 10) {
+        if (!pfClearBlock(info.node, "locked")) break;
+        n++;
+        try { info = pfBlockInfo(item); } catch (e1) { break; }
+      }
+      return n;
+    }
+
+    // 2. 文字(字符级, 与检查端同一粒度)
+    //   v10.46(审查 P1-1): 循环体抽成 pfRuleFrame —— 符号定义源内的文字帧复用同一套
+    function pfRuleFrame(tf) {
+      if (lf) unlocked += pfUnlockItem2(tf);
+      if (pfBlockInfo(tf)) { skipped++; return; }   // 锁定/隐藏: 跳过
+      try {
+        var ca = tf.textRange.characterAttributes;
+        var fc = null, sc = null;
+        try { fc = ca.fillColor; } catch (eFc) {}
+        try { sc = ca.strokeColor; } catch (eSc) {}
+        // 填充
+        // v10.39(审查 B5): 只在**真的发生改变**时才计入 acted(与 pfClearOverprint 的
+        //   `if (pfCharOvpFill(ca) || ...) { ...; cleared++; }` 口径对齐)。原先"命中颜色
+        //   就 +1" ⇒ 报出的 N 是命中颜色数, 不是实际关掉/打开的处数(重复执行同一条规则
+        //   会再次报出同一个 N)。
+        if (fc && pfColorMatchMode(fc, m)) {
+          try {
+            if (m === "white") { if (pfCharOvpFill(ca)) { ca.overprintFill = false; acted++; } }
+            else { if (!pfCharOvpFill(ca)) { ca.overprintFill = true; acted++; } }
+          } catch (eW1) { failed++; }
+        }
+        // 描边(仅当描边生效才处理)
+        var strokeOn = false;
+        try { strokeOn = (ca.strokeWeight > 0); } catch (eSw) {}
+        if (strokeOn && sc && pfColorMatchMode(sc, m)) {
+          try {
+            if (m === "white") { if (pfCharOvpStroke(ca)) { ca.overprintStroke = false; acted++; } }
+            else { if (!pfCharOvpStroke(ca)) { ca.overprintStroke = true; acted++; } }
+          } catch (eW2) { failed++; }
+        }
+      } catch (eT) { failed++; }
+    }
+    var tfs = doc.textFrames;
+    for (var i = tfs.length - 1; i >= 0; i--) pfRuleFrame(tfs[i]);
+
+    // 3. 图形(pageItem 级: PathItem 与 CompoundPathItem 各一遍)
+    function pfRulePath(pi) {
+      if (lf) unlocked += pfUnlockItem2(pi);
+      if (pfBlockInfo(pi)) { skipped++; return; }
+      var fOn = false, sOn = false;
+      try { fOn = (pi.filled === true); } catch (eFo) {}
+      try { sOn = (pi.stroked === true); } catch (eSo) {}
+      if (fOn) {
+        var fc2 = null; try { fc2 = pi.fillColor; } catch (e1) {}
+        if (fc2 && pfColorMatchMode(fc2, m)) {
+          try {
+            // v10.39(审查 B5): 同文字侧 —— 只计真实改变
+            if (m === "white") { if (pfOvpFill(pi)) { pi.fillOverprint = false; acted++; } }
+            else { if (!pfOvpFill(pi)) { pi.fillOverprint = true; acted++; } }
+          } catch (e2) { failed++; }
+        }
+      }
+      if (sOn) {
+        var sc2 = null; try { sc2 = pi.strokeColor; } catch (e3) {}
+        if (sc2 && pfColorMatchMode(sc2, m)) {
+          try {
+            if (m === "white") { if (pfOvpStroke(pi)) { pi.strokeOverprint = false; acted++; } }
+            else { if (!pfOvpStroke(pi)) { pi.strokeOverprint = true; acted++; } }
+          } catch (e4) { failed++; }
+        }
+      }
+    }
+    try { var ps = doc.pathItems; for (var j = ps.length - 1; j >= 0; j--) pfRulePath(ps[j]); } catch (ePS) {}
+    // ⚠ v10.53(审查 A2): 同 pfClearOverprint —— CompoundPathItem 自身 vs 检查端的
+    //   pathItems[0] vs 符号下钻内的逐组件, 三口径不同, 待真机验证后统一。
+    try { var cps = doc.compoundPathItems; for (var k = cps.length - 1; k >= 0; k--) pfRulePath(cps[k]); } catch (eCPS) {}
+
+    // 3b. v10.46(审查 P1-1): 符号定义源内的对象(文字帧 + 路径)下钻执行规则。
+    //   与 pfClearOverprint 同根因: 检查端统计含符号内对象, 本函数原先只走文档级
+    //   扁平集合 ⇒ 分级版"执行勾选项"对符号内叠印无效, 卡上数字清完不变。
+    //   口径同检查端: 隐藏/锁定实例跳过; 定义源内对象各自判定, 不重复计数。
+    function pfRuleInSym(container, depth) {
+      if (depth > 8) return;   // 符号内再套符号的防呆上限
+      var kids = null;
+      try { kids = container.pageItems; } catch (eK) { return; }
+      for (var ci = 0; ci < kids.length; ci++) {
+        var kIt = kids[ci], kTn = "";
+        try { kTn = kIt.typename; } catch (eKt) {}
+        if (kTn === "GroupItem") { pfRuleInSym(kIt, depth + 1); continue; }
+        if (kTn === "CompoundPathItem") {
+          // ⚠ v10.53(审查 A2): 同 pfClrOvpIn —— 逐组件处理, 与文档级"复合路径自身"、
+          //   检查端 pathItems[0] 口径不同, 待真机验证后统一。
+          try {
+            var kps = kIt.pathItems;
+            for (var kp = 0; kp < kps.length; kp++) pfRulePath(kps[kp]);
+          } catch (eKc) {}
+          continue;
+        }
+        if (kTn === "TextFrame") { pfRuleFrame(kIt); continue; }
+        if (kTn === "SymbolItem") {
+          if (pfBlockInfo(kIt)) { skipped++; continue; }
+          var kDef = null; try { kDef = kIt.symbol; } catch (eKd) {}
+          var kSrc = null;
+          if (kDef) { try { kSrc = kDef.item; } catch (eKs) {} if (!kSrc) { try { kSrc = kDef; } catch (eKs2) {} } }
+          if (kSrc && kSrc.pageItems) pfRuleInSym(kSrc, depth + 1);
+          continue;
+        }
+        pfRulePath(kIt);   // PathItem / MeshItem 等: 属性读写有 try 兜底, 不匹配的类型不动
+      }
+    }
+    try {
+      var sisR = doc.symbolItems;
+      for (var siR = 0; siR < sisR.length; siR++) {
+        var sItR = sisR[siR];
+        if (lf) unlocked += pfUnlockItem2(sItR);
+        if (pfBlockInfo(sItR)) { skipped++; continue; }
+        var sDefR = null; try { sDefR = sItR.symbol; } catch (eSdR) {}
+        var sSrcR = null;
+        if (sDefR) { try { sSrcR = sDefR.item; } catch (eSsR) {} if (!sSrcR) { try { sSrcR = sDefR; } catch (eSsR2) {} } }
+        if (sSrcR && sSrcR.pageItems) pfRuleInSym(sSrcR, 0);
+      }
+    } catch (eSymR) {}
+
+    res.ok = true;
+    res.acted = acted; res.skipped = skipped; res.failed = failed; res.unlocked = unlocked;
+    var label = (m === "white") ? "已清除需处理叠印" : "已为单黑对象新增叠印";
+    res.message = (acted > 0 ? label + " " + acted + " 处" : (m === "white" ? "未发现需处理的叠印" : "未发现可新增叠印的单黑对象")) +
+      (lf && unlocked > 0 ? "，解除锁定 " + unlocked + " 处" : "") +
+      (skipped > 0 ? "，跳过 " + skipped + " 处(锁定/隐藏，状态未改动)" : "") +
+      (failed > 0 ? "，失败 " + failed + " 处" : "") + "。";
+  } catch (err) {
+    res.ok = false;
+    res.error = "叠印规则处理失败: " + String(err);
+  }
+  return pfReturn(res);
+}
+// 颜色是否命中规则: "white" 判**需处理叠印**(纯白 + 彩色); "k100" 判单黑。
+//   即: white 模式命中 = 非 k100 且 非 spot(= 纯白 white 或 彩色 color),
+//   与界面「需处理叠印」口径一致(否则"勾了清除需处理叠印, 彩色却还在")。
+function pfColorMatchMode(c, m) {
+  try {
+    var cls = pfOvpClass(c).cls;
+    if (m === "white") return (cls === "white" || cls === "color");   // 需处理 = 纯白 + 彩色
+    if (m === "k100") return cls === "k100";
+    return false;
+  } catch (e) { return false; }
+}
+// 前端入口包装(两个独立函数, 便于按钮各自调用)
+function pfClearWhiteOverprint(lockFirst) { return pfOverprintRule("white", lockFirst); }
+function pfAddK100Overprint(lockFirst) { return pfOverprintRule("k100", lockFirst); }
+
+// ============================================================
+// v10.15: 删除全部隐藏对象(zhiban v10.14~15 同源移植) —— 只删对象, 隐藏图层本身保留。
+//   范围: **可见图层内**的隐藏组/Ctrl+3 隐藏对象; 隐藏图层(含子图层)整支跳过,
+//   层内对象一律不删 —— "删干净"到可见图层为止, 隐藏图层交由人工处理(雪糕要求)。
+// 安全: ① 收集与删除分离, 收集到的引用互不为祖先/后代(隐藏组收整组后不再下钻,
+//   隐藏图层只收各层顶级对象), 不会删到已失效引用;
+//   ② 锁定的隐藏对象 remove() 会抛异常 ⇒ 计入 failed 如实回报, 不擅自改锁定状态
+//   (与清叠印"不顺手改用户状态"同一哲学)。
+// ============================================================
+function pfDeleteHidden() {
+  var res = { ok: false };
+  try {
+    if (app.documents.length === 0) { res.error = "当前没有打开的文档，请先打开一个 AI 文件。"; return pfReturn(res); }
+    var doc = app.activeDocument;
+    var refs = [];   // 待删除对象引用
+    var failed = 0;
+
+    // 收集范围: 只收**可见图层内**的隐藏对象。
+    //   隐藏图层(含其子图层)整支跳过 —— 层内的隐藏对象一律不删。
+    //   可见性沿树向下传递, 故可见图层里遇到的隐藏组/隐藏对象才是收集目标。
+    // ⚠ v10.53(审查 A1): seenSym = 已下钻过的**符号定义源**容器(按对象去重)。
+    //   根因: 多个可见实例引用同一符号时 sdH.item 返回同一份定义源 —— 原实现每个实例
+    //   各下钻一遍 ⇒ 定义源内的隐藏对象 O 被 refs.push(O) 多次。删除循环里第二次
+    //   refs[r].remove() 抛异常 ⇒ failed++ ⇒ 报出"，N 处删除失败(可能被锁定，需先解锁再试)"。
+    //   数字恰好还是对的(refs.length - failed 抵消了重复), 但提示会**误导用户去解锁一堆
+    //   根本没锁的东西** —— 雪糕可见的误报。去重后每个物理对象在 refs 里只出现一次。
+    //   ⚠ 依赖 `===` 对"同一文档内同一符号定义源"的恒等性; 万一某版 AI 上不成立, 行为
+    //     退化为去重之前的样子(不会更差) —— 已记入真机待验清单。
+    //   ⚠ 副作用(有意为之): 卡②的隐藏计数是**按实例**累加的(检查端 visitItem 对多个实例
+    //     重复扫描, 注释写明"与'实际输出内容'口径一致"), 而本动作删的是定义源对象本身 ——
+    //     一次 remove 影响该符号的所有实例。故"卡②报 6 / 删完报 2"是两侧口径使然, 非漏删。
+    var seenSym = [];
+    function collectItems(items, depth) {
+      // v10.53(审查 新-1): 补上限, 防异常/损坏文档里的符号自引用无限递归。
+      //   ⚠ 取值必须是 64, **不能**照抄符号下钻那三处的 8 —— 本函数的 depth 同时计
+      //     **普通组/复合路径的嵌套**, 而卡②的隐藏计数走 visitItem(上限 64, 且每个顶层
+      //     对象都从 0 起算, 与这里 collectItems(ly.pageItems, 0) 完全对齐) ⇒ 取 8 会让
+      //     "第 9 层组内的隐藏对象"被检查端计入、却收集不到, 反而造出新的对不上账。
+      if (depth > 64) return;
+      for (var i = 0; i < items.length; i++) {
+        var it = items[i], tn = "";
+        try { tn = it.typename; } catch (eT) { continue; }
+        var hid = false;
+        try { hid = (it.hidden === true); } catch (eH) {}
+        if (hid) { refs.push(it); continue; }   // 隐藏组/隐藏对象: 整体收,不下钻
+        if (tn === "GroupItem") {
+          try { collectItems(it.pageItems, depth + 1); } catch (eG) {}
+        } else if (tn === "CompoundPathItem") {
+          try { collectItems(it.pathItems, depth + 1); } catch (eC) {}   // 组件路径可能单个被隐藏
+        } else if (tn === "SymbolItem") {
+          // v10.46(审查 P1-1): 可见符号实例的定义源下钻 —— 检查端卡②的隐藏计数含
+          //   "可见符号实例定义内的隐藏对象"(visitItem SymbolItem 分支), 删隐藏原先
+          //   不收 ⇒ "卡②报 N 个 / 删完只报 M 个"且无提示。
+          //   ⚠ 删的是**符号定义**内的对象, 影响该符号的所有实例 —— 确认框文案已说明
+          //   (main.js onDelHidden); 实例自身隐藏时已在上面整体收掉(删实例不动定义)。
+          //   v10.53: 定义源按 seenSym 去重, 同一符号只下钻一次(见上方说明)。
+          try {
+            var sdH = it.symbol;
+            var srcH = null;
+            if (sdH) { try { srcH = sdH.item; } catch (eSiH) {} if (!srcH) { try { srcH = sdH; } catch (eSdH2) {} } }
+            if (srcH && srcH.pageItems) {
+              var sDup = false;
+              for (var ds = 0; ds < seenSym.length; ds++) { if (seenSym[ds] === srcH) { sDup = true; break; } }
+              if (!sDup) { seenSym.push(srcH); collectItems(srcH.pageItems, depth + 1); }
+            }
+          } catch (eSymH) {}
+        }
+      }
+    }
+
+    // 隐藏图层一律跳过(不收集任何对象, 也不进其子图层) —— 交由人工处理。
+    function walkLayers(lyrs, depth) {
+      if (depth > 64) return;   // v10.39(审查 B2): 与主扫描 walkLayer 同款上限, 防异常层树
+      for (var i = 0; i < lyrs.length; i++) {
+        var ly = lyrs[i], vis = true;
+        try { vis = (ly.visible !== false); } catch (eV) {}
+        if (!vis) continue;   // 隐藏图层: 整支跳过(层内对象不删)
+        try { collectItems(ly.pageItems, 0); } catch (eCi) {}
+        // v10.39(审查 B2): 原为 walkLayers(subs[j]) —— 传的是**单个 Layer**, 而 Layer.length
+        //   是 undefined ⇒ `0 < undefined` 为假 ⇒ 循环体一次都不执行 ⇒ 子图层整支被跳过(笔误)。
+        //   对照 pfUsedColorKeys 的同名函数是传 subs 集合。修好前: 子图层内的隐藏对象既不会
+        //   被收集也不会被删除, 而卡②的隐藏计数(走 walkLayer, 递归本来正确)**含**子图层
+        //   ⇒ 会出现"卡②报 N 个 / 删完只报 M 个"且无任何提示。
+        try { var subs = ly.layers; if (subs && subs.length) walkLayers(subs, depth + 1); } catch (eL2) {}
+      }
+    }
+    walkLayers(doc.layers, 0);
+
+    // 删除(倒序;引用互不为祖先/后代,顺序无影响)
+    for (var r = refs.length - 1; r >= 0; r--) {
+      try { refs[r].remove(); } catch (eR) { failed++; }
+    }
+
+    res.ok = true;
+    res.deleted = refs.length - failed;
+    res.failed = failed;
+    res.message = (refs.length > 0 ? "已删除隐藏对象 " + (refs.length - failed) + " 个" : "未发现可删除的隐藏对象") +
+      (failed > 0 ? "，" + failed + " 处删除失败(可能被锁定，需先解锁再试)" : "") +
+      "。隐藏图层（含层内对象）已保留。";
+  } catch (err) {
+    res.ok = false;
+    res.error = "删除隐藏对象失败: " + String(err);
   }
   return pfReturn(res);
 }

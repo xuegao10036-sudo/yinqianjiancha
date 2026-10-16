@@ -5,13 +5,21 @@ html, body { height: 100%; }
 body {
   font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
   font-size: 12px;
-  /* v8.9: 三处底色依参考图重配 ——
-     页/面板底 #1e1e1e -> #151517、卡片底 #252526 -> #1b1b1c、卡片头 #2d2d30 -> #2c2c2e。
-     顶部栏与滚动条共用同一批色值,一并跟随(否则会出现明显色差层)。 */
-  background: #151517;
+  /* v8.9: 三处底色依参考图重配 —— 页/面板底、卡片底、卡片头; 顶部栏与滚动条共用同一批色值,
+     一并跟随(否则会出现明显色差层)。
+     v10.48(雪糕定, 方案 B-1): 页底 -> #000(卡片统一单色 #1b1b1b 后, 靠更黑的页底把卡片衬出来);
+     卡片底与卡头统一 #1b1b1b(卡头以 1px 内阴影分隔)。
+     v10.50(雪糕定): 顶栏底色 #1b1b1b -> #000, 与页底同色 —— 顶栏不再跟随卡片层。
+       底边 1px #3a3a3a 保留: 它是 fixed 顶栏与滚动内容的分界, 且在盒模型里占 1px,
+       顶栏高度恒 58px ⇒ body 的 padding-top:58px 占位不受影响。
+     同批跟随改 #000 的四处: body 页底 / .modal 弹窗底 / 滚动条槽 / 滚动条槽描边与角。 */
+  background: #000;
   color: #e6e6e6;
   overflow-x: hidden;
   overflow-y: auto;
+  /* v10.45: 顶栏改 fixed 后, body 顶部留出等高占位, 否则首屏内容被顶栏盖住。
+     58px = 无头实测 .topbar 高度(顶栏 flex 不换行 ⇒ 与面板宽度无关, 恒定值)。 */
+  padding-top: 58px;
   /* v10.11e: 恒定预留滚动条槽位 —— 点「开始检查」清空结果时页面变短、滚动条消失又回来,
      视口宽度 10px 一伸一缩, sticky 顶栏(含按钮)跟着平移, 被感知为"按钮闪了一下"。
      stable 让槽位始终占位, 视口宽度恒定, 顶栏不再回退。 */
@@ -26,40 +34,64 @@ button, input { font-family: inherit; }
 
 /* 深色滚动条 */
 ::-webkit-scrollbar { width: 10px; height: 10px; }
-::-webkit-scrollbar-track { background: #151517; }
-::-webkit-scrollbar-thumb { background: #4a4a4a; border-radius: 5px; border: 2px solid #151517; }
+::-webkit-scrollbar-track { background: #000; }
+::-webkit-scrollbar-thumb { background: #4a4a4a; border-radius: 5px; border: 2px solid #000; }
 ::-webkit-scrollbar-thumb:hover { background: #5a5a5a; }
-::-webkit-scrollbar-corner { background: #151517; }
+::-webkit-scrollbar-corner { background: #000; }
 
+/* v10.45: 顶栏定位由 sticky 改为固定定位。
+   ⚠ 根因: CEP 内核下 body 充当滚动容器时(html,body{height:100%} + body 的 overflow-y:auto),
+   sticky 找不到滚动祖先 ⇒ 退化成普通流, 整条顶栏随内容一起滚走(雪糕反馈"下滑时顶栏消失";
+   标准 Chrome 两组实测均正常 ⇒ 属 CEP 兼容差异, 非写法错误)。
+   改固定定位: 相对视口, 不依赖滚动祖先识别; 与 .modal-mask 同族(后者在 CEP 中一直正常)。
+   ⚠ 配套: body 已加 padding-top 占位, 两者必须成对改动。 */
 .topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
-  background: #1b1b1c;
+  padding: 10px 15px;
+  /* v10.50(雪糕定): 顶栏底色 #1b1b1b -> #000, 与页底同色(不再作为"卡片层的一块")。
+     底边 1px #3a3a3a 保留: 顶栏 fixed, 滚动时卡片从这条线下滑过, 它是顶栏与内容区的分界;
+     该线在盒模型里占 1px ⇒ 顶栏高度恒 58px, body 的 padding-top:58px 占位不受影响。 */
+  background: #000;
   border-bottom: 1px solid #3a3a3a;
-  position: sticky;
+  position: fixed;
   top: 0;
+  left: 0;
+  right: 0;
   z-index: 10;
 }
-.title { font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 5px; }
-.title svg { flex: none; }
+/* v10.15: 版本号挪到名称下面 —— 两行纵排 */
+/* v10.39(审查 B7): 去掉 font-size:14px / font-weight:600(两个子元素 .tname / .ver 各自声明
+   11px/400, 已无继承者 ⇒ 死属性), 并删 `.title svg { flex: none; }`(index.html 唯一的 svg
+   在齿轮按钮里、不在 .title 内, 该规则从未匹配到任何元素)。 */
+.title { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; line-height: 1.3; }
 /* v10.3: 10 -> 11px(全站最小档取消, 10px 只剩页脚一处) */
-.ver { font-size: 11px; color: #8a8a8a; font-weight: 400; margin-left: 2px; }
+.ver { font-size: 11px; color: #8a8a8a; font-weight: 400; }
+/* v10.38: 面板名跟版本号同款 —— 灰 #8a8a8a / 同字号 11px / 同字重 400(雪糕要求视觉统一) */
+.tname { font-size: 11px; color: #8a8a8a; font-weight: 400; }
 
+/* v10.49(雪糕定): 底蓝 #0e639c -> #3968C8(更亮的宝蓝, 原色偏青)。
+   ⚠ :hover 同步换同色系的亮一档 #4a78d6 —— 留着旧 #1177bb 会出现"换了种蓝"的跳色。 */
 .btn {
-  background: #0e639c;
+  background: #3968C8;
   color: #fff;
   border: none;
   border-radius: 999px; /* v9.0: 方案 C —— 三族按钮统一胶囊 */
-  /* v6.1: 左右内边距 20px→30px,"开始检查"按钮加宽约 20% */
-  padding: 9px 30px;
+  /* v6.1: 左右内边距 20px→30px 加宽; v10.12b: 定宽 100px —— 与「一键处理」等宽并排
+     (原 30px 内边距撑出的 116px 改为定宽, 左右 padding 清零文字居中)。
+     v10.41: 「一键处理(全部清理)」已移除, 定宽保留 —— 顶栏只剩「开始检查」一枚,
+     保持原尺寸不做加宽(改动最小, 也避免顶栏宽度再变)。 */
+  width: 100px;
+  padding: 9px 0;
   font-size: 14px;
   font-weight: 600;
   cursor: pointer;
 }
-.btn:hover { background: #1177bb; }
+.btn:hover { background: #4a78d6; }
 .btn:disabled { background: #555; cursor: default; }
+
+/* v10.41: 顶栏红色「一键处理 / 全部清理」(v10.12 引入) 已整支移除 ⇒ 其专属规则一并删除。 */
 
 /* 卡片内的一键操作按钮: 红色、放大 */
 .btn-action {
@@ -121,7 +153,7 @@ label.chk input[type="checkbox"] {
      ⚠ 代价: 成功 / 失败从此只能靠"描边色 + 文字色"区分(原来那根竖条是最强的视觉标识),
      所以描边别再改细, 否则两条提示会越看越像。 */
   border: 2px solid #6e2a22;
-  border-radius: 12px;
+  border-radius: 15px;
   color: #f48771;
   font-size: 14px;
   line-height: 1.6;
@@ -133,7 +165,7 @@ label.chk input[type="checkbox"] {
   background: #1f1f1f;
   /* v9.2: 同 .error —— 去左侧竖条, 外层描边 1px -> 2px */
   border: 2px solid #2e5c40;
-  border-radius: 12px;
+  border-radius: 15px;
   color: #4ec98a;
   font-size: 14px;
   line-height: 1.6;
@@ -149,10 +181,10 @@ label.chk input[type="checkbox"] {
   justify-content: center;
 }
 .modal {
-  background: #151517;
+  background: #000;
   border: 1px solid #4a4a4a;
   /* v9.1: 弹窗 8px -> 12px, 与卡片 / 提示条对齐(方案 C 收尾) */
-  border-radius: 12px;
+  border-radius: 15px;
   padding: 18px 20px;
   min-width: 280px;
   max-width: 86%;
@@ -185,6 +217,17 @@ label.chk input[type="checkbox"] {
   padding: 10px 28px;
   font-size: 15px;
   font-weight: 600;
+}
+/* v10.59(雪糕定): 确认框的两颗按钮原先只靠 padding 包住「取消 / 确定」两个字, 在弹窗里显得
+   小而弱 ⇒ 改成与卡内「一键嵌入」(.btn-action)同款规格: 两颗**等宽拉长**、各占半行铺满弹窗,
+   高 44px(= 10 + 24 + 10, 与 .btn-action 同高)。
+   ⚠ 作用域限定确认框 —— 设置弹层(.set-modal)是三颗 + .set-gap 撑开, 不能一起改。
+   ⚠ 这里**不写 border-radius** —— 沿用 .modal-btn 的 999px, 免得 v9.0 那条按 `.modal-btn {`
+     取块的圆角断言先命中本块。(新块特指度高, 其余属性照常覆盖。) */
+.modal:not(.set-modal) .modal-btn {
+  flex: 1 1 0;
+  padding: 10px 20px;
+  line-height: 24px;
 }
 .modal-cancel { background: #3a3a3a; color: #e6e6e6; }
 .modal-cancel:hover { background: #4a4a4a; }
@@ -247,6 +290,9 @@ label.chk input[type="checkbox"] {
 .grip:active { cursor: grabbing; }
 .set-row.dragging { background: #2f2f31; box-shadow: inset 0 0 0 1px #4a4a4a; }
 .set-row.dragging .grip { cursor: grabbing; color: #e6e6e6; }
+/* v10.32: 拖动插入位反馈(审查 #9) —— 落点行顶/底边高亮, 一眼看出"会插到哪" */
+/* ⚠ v10.33: v10.32 加的 .set-row.drop-above / .drop-below(拖拽插入位指示线)已删除 ——
+   那是死代码(dragTarget 与 dragPos 被同时赋值, 分支永不命中, 见 main.js 注释)。 */
 
 /* v10.1: 阈值输入区 —— 单位列固定 26px 且**每行都生成**(空单位也给空 span),
    这样 flex space-between 下输入框的左右边界 7 行完全对齐。 */
@@ -269,17 +315,28 @@ label.chk input[type="checkbox"] {
 /* v10.0: 已关闭的占位卡 —— 整卡降透明度、标题转灰、徽标用中性灰 */
 .card.card-off { opacity: 0.55; }
 .card.card-off .card-head { color: #999; }
-.chip.off { background: #1b1b1c; color: #999; }
+.chip.off { background: #1b1b1b; color: #999; }
 
 /* v10.3: 左右 10 -> 12px。顶栏与页脚都是 12px, 只有卡片区是 10px ⇒ 卡片左右边缘
    比顶栏按钮 / 页脚各多探出 2px(实测)。 */
-.results { padding: 12px 12px 4px; }
+/* v10.55(雪糕定): 面板**横向留白统一 14px** —— 顶栏 .topbar、页脚 .foot、卡片区外沿 .results、
+   卡片内 .card-head / .card-body 全为 14px(原 12 / 12 / 12 / 10 / 10)。
+   起因: 卡片圆角是 12px, 而内容只留 10px, 文字与徽标比圆角还贴边, 看着挤。
+   ⚠ 只动横向: 各块竖向内边距一律未变 ⇒ 顶栏仍 58px、卡头仍 37px、页脚行数不变。
+   ⚠ 卡片因此窄 4px(两侧各少 2) ⇒ 窄面板(260/300px)下长行会更早换行, 卡高可能微增。 
+   v10.57(雪糕定): 五处横向 14 -> **15px**(顶栏/卡片区/页脚/卡头/卡体一起动) —— 雪糕要卡片内"上下左右都 15", 而卡片内一改就跟顶栏/页脚外沿差 1px ⇒ 外沿一并对齐 15(保住 v10.55 的"外沿齐")。
+   ⚠ 顶栏高仍 58px、卡头仍 37px(竖向未动); 代价: 卡片可用宽 736 -> 734px。*/
+.results { padding: 12px 15px 4px; }
 
 .card {
-  background: #1b1b1c;
+  background: #1b1b1b;
   /* v6.0: 去掉卡片外侧描边(方案 B)——分块只靠底色差与间距,不再画线 */
   /* v9.0: 卡片圆角 5px -> 12px(方案 C「全面胶囊」) */
-  border-radius: 12px;
+  /* v10.58: 12px -> 15px —— 与卡片内四边留白 15px(v10.57)齐平。内容退到 15px 而圆角只有 12px 时,
+     四角会出现"直角内胆"(内容边比弧线起弧点更靠内); 圆角跟到 15px 即齐平。
+     同档一起改的还有 .notice / .error / .modal(拆开会重新引入 v9.1 收掉的"两种圆角语言")。
+     ⚠ .chip 仍 10px(仅 ~21px 高, 10px 已是胶囊形)、按钮族仍 999px。圆角不参与盒模型 ⇒ 零几何位移。 */
+  border-radius: 15px;
   margin-bottom: 10px;
   overflow: hidden;
 }
@@ -287,10 +344,21 @@ label.chk input[type="checkbox"] {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 10px;
-  background: #2c2c2e;
+  padding: 8px 15px;
+  background: #1b1b1b;
+  /* v10.48: 卡头与卡体同色(统一单色)。
+     v10.54: 去掉卡头与卡体之间的内阴影分隔线 —— 单色方案下本就不必需, 卡片连排时
+       少了这条线反而更整; 分块仍靠 10px 卡片间距。
+       ⚠ 仍不用 border: 加 border 会让卡头 37px -> 38px(项目要求卡头零位移, 见 v10.4 徽标那条)。
+     v10.54: 标题字号 12 -> 14px。无头 Chrome 实测(260~420px 全宽 x 12~15px 全档):
+       卡头恒 37px、卡体恒 73px —— 卡头高由徽标(21px)决定, 字号不参与, 故零位移。
+       标题墨迹高 16 -> 19px; 卡③ 三徽标下标题可用宽 76 -> 89px; 截断阈值 300 -> 320px。
+     v10.55: 横向 10 -> 14px(与面板其余留白统一, 见 .results 上方那段)。
+     v10.57(雪糕定): 横向 14 -> 15px —— 卡片内"内容距边缘"统一到 15px(与卡体同步)。
+       ⚠ 上下仍 8px 未动(雪糕选"卡头上下保持 8"): 卡头高恒 37px = 8 + 徽标 21 + 8,
+         动上不动下会让标题偏下、上下都动则卡头 51px 太空 ⇒ 这一档不动。 */
   font-weight: 600;
-  font-size: 12px;
+  font-size: 14px;
 }
 .card-head .chips { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
 /* v10.3: 卡头标题单行省略。徽标是 flex-shrink:0 不会换行, 窄面板下被挤折的是标题:
@@ -303,7 +371,18 @@ label.chk input[type="checkbox"] {
    于是长期比样本行(写死 19px)更挤; 而汇总行还是微软雅黑(字面 1.36em ⇒ 15px),
    上下可见空隙只剩 1.85px。改固定 20px 后卡内未写行高的文字同盒;
    ul.list li(19px) 与 table.kv td(18px) 是写死的, 24px 节奏不受影响。 */
-.card-body { padding: 8px 10px; line-height: 20px; }
+/* v10.55(雪糕定, A 档): 竖向 8/8 -> 4/12 —— 标题行到首行由 16px 收到 12px、
+   末行到卡底由 8px 放到 12px(原 16:8 上松下挤)。上下之和仍 16px ⇒ 卡体高不变
+   (实测卡高 176/390/343 与改前一致)。横向 10 -> 14px 见 .results 上方。 */
+/* v10.56(雪糕定): 下 12 -> 10px —— 实测**视觉**留白(末行墨迹->卡底)是 16~18px,
+   比左/右(各 14px)多 2~4px: 12px padding 之外还有行盒半行距 4px,
+   ul.list 收尾的卡再多自带 2px。收到 10px 后: 表格/纯文字收尾=12~14px、
+   清单收尾=16px ⇒ 与左右基本齐平。上 4px 未动(雪糕认可上左右一致)。
+   ⚠ 上下之和 16 -> 14px ⇒ 卡体比 v10.55 矮 2px(本轮预期内的变化)。 */
+/* v10.57(雪糕定): 横向 14 -> 15px、下 10 -> 11px —— 卡片内"内容距边缘"统一 15px。
+   下取 11 而非 15: 行盒半行距还会再给 4px ⇒ 视觉落点 = 15(与左右一致)。
+   ⚠ 上仍 4px 未动(首行距标题 8px 是 v10.55 定的观感, 雪糕认可); 卡头上下 8 亦未动。 */
+.card-body { padding: 4px 15px 11px; line-height: 20px; }
 /* v10.3: 卡体首元素不再白吃 margin-top —— 卡⑥ 只渲染汇总行时, .ink-rest 的 8px
    上边距没人抵消, 实测首行离卡头 16px, 而其它卡 8~10px。 */
 .card-body > :first-child { margin-top: 0; }
@@ -340,8 +419,10 @@ label.chk input[type="checkbox"] {
      ⚠ 取舍如实记: #333 vs 卡头 #2c2c2e = 1.10:1, 比 #1b1b1c 的 1.23:1 更贴近卡头
        —— v10.5 改深正是因为雪糕当时反馈 #333 与卡头"粘在一起"; 本轮他按视觉偏好改回。
      绿字 #4ec98a on #333 = 6.04:1, 仍过 AA 4.5。
-     .chip.off(灰字) **未动**, 仍是 #1b1b1c —— ok/off 自此不再"同色同源"。 */
-.chip.ok   { background: #333; color: #4ec98a; }
+     .chip.off(灰字) **未动**, 仍是深灰底(与卡头同色) —— ok/off 自此不再"同色同源"。
+     v10.49(雪糕 2026-10-15 定): 绿徽标**底色整个去掉**(连圆角矩形一起), 只留绿字 #4ec98a;
+       灰徽标仍留深灰底。红/黄两枚不动(语义色, 不参与本次调整)。 */
+.chip.ok   { background: transparent; color: #4ec98a; }
 .chip.warn { background: #4a3a14; color: #e8b93e; }
 .chip.bad  { background: #4a1d1a; color: #f06a55; }
 
@@ -439,9 +520,9 @@ ul.list li .trunc { max-width: 100%; display: block; }
 .row-h { flex: 0 0 auto; margin-left: auto; color: #8a8a8a; font-size: 11px; font-weight: 400; white-space: nowrap; }
 
 .foot {
-  padding: 8px 12px 12px;
+  padding: 8px 15px 12px;
   color: #8a8a8a;
-  font-size: 11px; /* v10.3: 10 -> 11px。v10.6 起这一档只兜 .fbuild 了(.fname/.fpath 自带 12px) */
+  font-size: 11px; /* v10.3: 10 -> 11px。v10.6 起这一档改兜顶栏 .tname(v10.38); ⚠ v10.43(P3-5) 起 .fbuild 也升 12px, 11px 档不再服务页脚 —— 四档断言(11/12/14/15)仍要求 11px 存在, 勿删 */
   line-height: 1.5;
   word-break: break-all;
 }
@@ -452,10 +533,46 @@ ul.list li .trunc { max-width: 100%; display: block; }
      .fname 原为  = 11px / #e6e6e6 / 行盒 16.5px
      .fpath 原为  = 11px / #808080 / 行盒 16.5px
    ⇒ 三项全对齐: 字号 12px、色 #888、行盒 20px。
-   ⚠ 只动 .fname / .fpath; .fbuild(符号 N 个)仍是 11px / #555 —— 未点名, 故未动。
-   ⚠ 页脚在卡片区之下(body 滚动), 所以本次改动**不影响任何卡片的高度/版式**。 */
+   ⚠ 页脚在卡片区之下(body 滚动), 所以本次改动**不影响任何卡片的高度/版式**。
+   v10.43(审查 P3-5): .fbuild(符号 N 个)一并补齐 —— v10.6 当时"未点名故未动",
+     但它与 .fname/.fpath 同屏相邻, 11px/#808080 与另两行的 12px/#8a8a8a 肉眼可辨。
+     ⚠ 注意: #8a8a8a 与 .tname(v10.38)同色, 改 .fbuild 色值会动 tests 里 #8a8a8a
+       的计数断言(已同步, 见 outline-regression v10.43 块)。 */
 .foot .fname { display: block; color: #8a8a8a; font-size: 12px; line-height: 20px; }
 .foot .fpath { display: block; color: #8a8a8a; font-size: 12px; line-height: 20px; margin-top: 2px; }
-.foot .fbuild { display: block; color: #808080; margin-top: 2px; }
+.foot .fbuild { display: block; color: #8a8a8a; font-size: 12px; line-height: 20px; margin-top: 2px; }
 
 .hidden { display: none; }
+
+/* ---------- v10.14: 叠印卡两版共存(A 方案卡内切换) ----------
+   .ovp-dual 容器同时装「简洁版」「分级版」两张卡, data-m 决定显隐;
+   切换零 JS 重渲染 —— 点 seg 只改 data-m 属性 + localStorage。 */
+.ovp-dual[data-m="legacy"] .ovp-tiered,
+.ovp-dual[data-m="tiered"] .ovp-legacy { display: none; }
+
+/* v10.17: seg 页签胶囊样式(参考雪糕图2: 深底胶囊容器, 选中蓝底白字胶囊块, 无边框)。
+   v10.20: seg 回到"叠印"标题后面(标题 span 内), 徽标恢复靠右 —— margin-left:auto(推行尾)改 6px(与 chips gap 同值)。
+   v10.23: 方案C扁平化(雪糕选定) —— 容器描边成槽(#232323 槽底 + 1px #3f3f3f 描边),
+     选中块纯蓝底滑块(无投影/无亮蓝描边圈), 未选中块素净。⚠圆角全用 999px 胶囊 —— 不引入新 border-radius 值。
+   v10.25: 压竖向尺寸(雪糕点名卡头比其他卡高) —— 容器 padding 3→1px、块 5→2px,
+     seg 总高 29→19px(< 徽标高度) ⇒ 卡头高度回落为由徽标决定, 与其他卡统一。
+   v10.26: 块竖向 2→3px(雪糕点名"全清理按钮适当再高点") —— seg 总高 19→21px,
+     与徽标(约 20.5px)齐平, 卡头高度不变。左右 14px 不变。
+   v10.27: 块再高一点(雪糕再点名) —— 容器 padding 1→0px 匀给块(3→4px),
+     seg 总高 21px 不变 ⇒ 卡头不变, 按钮再高 2px。 */
+/* v10.31: 叠印卡名 + 滑块同排 —— 卡名可省略让位, 滑块 flex:none 恒可见 */
+/* v10.33: 加 :not(.ovp-seg) (审查 v10.32 第 9 条) —— 原选择器把叠印行的 .ovp-seg(也是直接子 span)
+   一并命中; 那三个属性对 inline-flex 无效, 当前无视觉副作用, 但语义不精确, 收窄后意图明确。 */
+.set-ck > span:not(.ovp-seg) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ovp-seg { display: inline-flex; margin-left: 6px; padding: 0; background: #232323; border: 1px solid #3f3f3f; border-radius: 999px; flex-shrink: 0; vertical-align: middle; }
+.ovp-seg i { font-style: normal; font-size: 11px; line-height: 1; padding: 4px 14px; color: #9a9a9a; background: transparent; border-radius: 999px; cursor: pointer; }
+.ovp-seg i:hover { color: #d8d8d8; }
+/* v10.31: 选中块与「开始检查」同蓝(#0e639c), hover 同 #1177bb —— 原来是 #4a6da7 */
+/* v10.47(雪糕定): 选中态由「蓝底白字」(#0e639c/#fff, 与顶栏「开始检查」同色, 在弹层里抢眼)
+   改为「白底黑字」(#fff/#111)。黑字压纯白对比约 19:1, 选中项成为弹层里最亮的一块, 焦点明确。
+   ⚠ :hover 必须跟着改成 #fff —— 否则鼠标停在已选项上会闪回蓝底。 */
+.ovp-seg i.on { color: #111; background: #fff; cursor: default; }
+.ovp-seg i.on:hover { background: #fff; }
+
+/* 分级版四分类行(单黑/专色/需处理), 行距略收 */
+.ovp-cls { padding: 2px 0 4px; line-height: 1.85; }

@@ -19,17 +19,20 @@ if exist "%DEST%\CSXS" rmdir /S /Q "%DEST%\CSXS"
 if exist "%DEST%\css" rmdir /S /Q "%DEST%\css"
 if exist "%DEST%\js" rmdir /S /Q "%DEST%\js"
 if exist "%DEST%\jsx" rmdir /S /Q "%DEST%\jsx"
-xcopy "%~dp0CSXS" "%DEST%\CSXS" /E /I /Y /Q >nul
-xcopy "%~dp0css"  "%DEST%\css"  /E /I /Y /Q >nul
-xcopy "%~dp0js"   "%DEST%\js"   /E /I /Y /Q >nul
-xcopy "%~dp0jsx"  "%DEST%\jsx"  /E /I /Y /Q >nul
-xcopy "%~dp0index.html" "%DEST%\" /E /I /Y /Q >nul
-if errorlevel 1 set "FAIL=1"
-rem v10.10: verify all 5 payloads - the errorlevel above only reflects the last copy
+rem v10.44: 扩展菜单图标(images/icon.png)随包分发
+if exist "%DEST%\images" rmdir /S /Q "%DEST%\images"
+rem v10.28: each xcopy checks its own errorlevel - a trailing check only reflects the last copy
+xcopy "%~dp0CSXS" "%DEST%\CSXS" /E /I /Y /Q >nul || set "FAIL=1"
+xcopy "%~dp0css"  "%DEST%\css"  /E /I /Y /Q >nul || set "FAIL=1"
+xcopy "%~dp0js"   "%DEST%\js"   /E /I /Y /Q >nul || set "FAIL=1"
+xcopy "%~dp0jsx"  "%DEST%\jsx"  /E /I /Y /Q >nul || set "FAIL=1"
+xcopy "%~dp0images" "%DEST%\images" /E /I /Y /Q >nul || set "FAIL=1"
+xcopy "%~dp0index.html" "%DEST%\" /E /I /Y /Q >nul || set "FAIL=1"
 if not exist "%DEST%\CSXS\manifest.xml" set "FAIL=1"
 if not exist "%DEST%\css\style.css" set "FAIL=1"
 if not exist "%DEST%\js\main.js" set "FAIL=1"
 if not exist "%DEST%\jsx\preflight.jsx" set "FAIL=1"
+if not exist "%DEST%\images\icon.png" set "FAIL=1"
 if not exist "%DEST%\index.html" set "FAIL=1"
 if defined FAIL echo       FAILED - see TROUBLESHOOTING below.
 if not defined FAIL echo       OK - files copied.
@@ -37,8 +40,10 @@ if not defined FAIL echo       OK - files copied.
 echo.
 echo [2/3] Enable CEP debug mode (required for unsigned extensions)
 set "REGFAIL="
-for /l %%V in (9,1,16) do reg add "HKCU\Software\Adobe\CSXS.%%V" /v PlayerDebugMode /t REG_SZ /d 1 /f >nul 2>&1
-if errorlevel 1 set "REGFAIL=1"
+rem v10.28: errorlevel check inside the loop - a check after the loop only sees the last reg add
+for /l %%V in (9,1,16) do (
+  reg add "HKCU\Software\Adobe\CSXS.%%V" /v PlayerDebugMode /t REG_SZ /d 1 /f >nul 2>&1 || set "REGFAIL=1"
+)
 if defined REGFAIL echo       WARN - could not write PlayerDebugMode.
 if defined REGFAIL echo              FIX: run as administrator, or add it in regedit by hand.
 if not defined REGFAIL echo       OK - PlayerDebugMode set to 1 for CSXS 9 to 16.
@@ -66,6 +71,13 @@ if not defined FAIL powershell -NoProfile -WindowStyle Hidden -EncodedCommand QQ
 if defined FAIL powershell -NoProfile -WindowStyle Hidden -EncodedCommand QQBkAGQALQBUAHkAcABlACAALQBBAHMAcwBlAG0AYgBsAHkATgBhAG0AZQAgAFMAeQBzAHQAZQBtAC4AVwBpAG4AZABvAHcAcwAuAEYAbwByAG0AcwA7ACAAWwBTAHkAcwB0AGUAbQAuAFcAaQBuAGQAbwB3AHMALgBGAG8AcgBtAHMALgBNAGUAcwBzAGEAZwBlAEIAbwB4AF0AOgA6AFMAaABvAHcAKAAiAIlbxYgxWSWNAf/mi8VgwYnRnnKCp2M2UvBTl3rjUxr/h2X2Tg1ZNlL6URmVDP8WYgOM1YsAX3NRmVFlUTFZJY0CMCIALAAgACIAiVvFiDFZJY0iACwAIAAiAE8ASwAiACwAIAAiAEUAcgByAG8AcgAiACkA
 
 echo.
-if defined FAIL pause
+rem v10.32: 兜底等待 —— 正常路径下 powershell 弹窗会一直挂住直到用户点 OK(上面那句不会
+rem   执行到)。但若这台机器上 powershell 被 AppLocker/组策略拦掉, 上面两句会**立即失败返回**,
+rem   窗口会一闪而过, 用户根本看不到 FAILED / TROUBLESHOOTING 提示。这里补一句纯内建等待。
+rem v10.33: 原写成 `timeout ... || pause` 后又跟一句 pause ⇒ timeout 走完还要再按一次键
+rem   (外部审查 v10.32 第 2 条实锤)。改为只用 pause —— 它是 cmd 内建, 不受组策略拦,
+rem   按键即走比"干等 30 秒"更自然。
+if defined FAIL echo Press any key to close this window...
+if defined FAIL pause >nul
 if defined FAIL exit /b 1
 exit /b 0

@@ -18,8 +18,10 @@ cp -R "$SRC/CSXS" "$DEST/"
 cp -R "$SRC/css" "$DEST/"
 cp -R "$SRC/js" "$DEST/"
 cp -R "$SRC/jsx" "$DEST/"
+# v10.44 的扩展菜单图标在 images/ —— 与 Windows bat 同款, 漏拷会让菜单/扩展栏没有图标
+cp -R "$SRC/images" "$DEST/"
 cp "$SRC/index.html" "$DEST/"
-if [ -f "$DEST/CSXS/manifest.xml" ] && [ -f "$DEST/js/main.js" ] && [ -f "$DEST/jsx/preflight.jsx" ]; then
+if [ -f "$DEST/CSXS/manifest.xml" ] && [ -f "$DEST/js/main.js" ] && [ -f "$DEST/jsx/preflight.jsx" ] && [ -f "$DEST/images/icon.png" ]; then
   echo "      OK - files copied."
 else
   echo "      FAILED - copy step. Check the folder is not inside the downloaded ZIP."

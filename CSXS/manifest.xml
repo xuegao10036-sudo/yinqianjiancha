@@ -1,13 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!-- ExtensionBundleVersion / Extension Version = CEP 包版本(安装/升级识别用), 与面板版本
-     (v10.x, 见 index.html 的 .ver 与 main.js 的 JS_BUILD)无关, 因此不随面板升号, 保持 1.0.0。 -->
+<!-- v10.15: ExtensionBundleVersion / Extension Version 改为随面板版本走(x.y.z 对应 vX.Y) ——
+     CEP 按 manifest 版本判断扩展是否升级, 恒 1.0.0 会导致 cep_cache 沿用旧 HTML/JS
+     (真机出现"index 新、main.js 旧"的混血状态)。升面板版本时此处同步改。 -->
 <ExtensionManifest Version="8.0"
     ExtensionBundleId="com.workbuddy.ai.preflight"
-    ExtensionBundleVersion="1.0.0"
+    ExtensionBundleVersion="11.0.0"
     ExtensionBundleName="AI印前检查面板"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <ExtensionList>
-    <Extension Id="com.workbuddy.ai.preflight.panel" Version="1.0.0"/>
+    <Extension Id="com.workbuddy.ai.preflight.panel" Version="11.0.0"/>
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>
@@ -34,6 +35,20 @@
         <UI>
           <Type>Panel</Type>
           <Menu>印前检查-雪糕</Menu>
+          <!-- v10.44: 扩展菜单图标(「窗口 → 扩展功能」列表)。⚠ 路径基准是**扩展根目录**
+               (与 MainPath 的 ./index.html 同基准), 不是 CSXS/ —— 早期按 CSXS/ 放过图标
+               找不到, 是"改了没生效"的首因。
+               ⚠ SVG 在 Illustrator 扩展菜单支持不稳, 故用 PNG(48×48, 覆盖 1x/2x)。
+               ⚠ 四个 Type 同指一个文件: 菜单只显示 Normal; RollOver/Dark 变体缺失时
+               CEP 回退 Normal, 单文件即可(雪糕选 B 方案: 不铺一屏图标文件)。
+               ⚠ 缓存坑: 换 manifest 内容必须动 ExtensionBundleVersion(本次随面板同升),
+               否则 CEP 认为扩展未变、沿用缓存里的旧 manifest。 -->
+          <Icons>
+            <Icon Type="Normal">./images/icon.png</Icon>
+            <Icon Type="RollOver">./images/icon.png</Icon>
+            <Icon Type="DarkNormal">./images/icon.png</Icon>
+            <Icon Type="DarkRollOver">./images/icon.png</Icon>
+          </Icons>
           <Geometry>
             <Size>
               <Width>420</Width>

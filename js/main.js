@@ -2,11 +2,16 @@
 (function () {
   "use strict";
 
-  var JS_BUILD = "20261008-2";
+  // v10.46: 全量审查修复(P1-1 符号口径由 jsx 侧下钻补齐 / P1-2 阈值输入不打断 /
+  //   P2-3 卡⑧未检查态徽标)
+  // v10.60(审查 2.1/2.5): inkWarn 纠正下限与 jsx 对齐(取默认值而非仅 ov+1);
+  //   run() 超时后补一枚宽限计时器兜底解锁 scanBusy(防 jsx 挂死锁面板)
+  // v11.0: 版本号跃升至 11.0(代码内容与 v10.60 一致, 仅版本标识变更)
+  var JS_BUILD = "20261016-7";
   // 必须与 jsx/preflight.jsx 里的 PF_BUILD 保持一致。
   // JSX 每次返回都会带上它的构建号,前端据此判断 ExtendScript 引擎里
   // 加载的是不是当前版本 —— 不一致就强制 $.evalFile 重载(见 execJsx)。
-  var JSX_BUILD = "10.11";
+  var JSX_BUILD = "11.0";
   // v10.2 收尾: 「耗时较长」提示阈值 —— 原先 20000 在 run() 与 execAction() 各写一遍,
   //   连提示语里的「20 秒」也是手写 ⇒ 改口径要动 3 处、漏一处就文案与行为不一致。收成一处。
   var BUSY_TIMEOUT_MS = 20000;
@@ -102,13 +107,40 @@
   // 两种情况会自动退回"带重载"的调用: ① AI 重启后引擎被清空
   // ② 部署了新版 jsx(PF_BUILD 变了)—— 所以改完 JSX 仍无需重启 AI。
   var jsxReady = false;
-  function execJsx(call, cb) {
+  // v10.36(审查 v10.35 #5): execJsx 的"重发"分流 —— 只读函数可安全重发, 写动作不可。
+  //   原实现在 jsxReady 为真但返回值 build 不符时, 一律用 withLoad **重发同一条 call**。
+  //   对只读探针(runPreflight)无副作用; 但对写动作(pfOutlineAll/pfEmbedAll/pfClearOverprint/
+  //   pfDeleteHidden/pfClear*Swatches/…) —— 首次 call 可能**已在宿主执行成功、只是返回值解析
+  //   失败**(超时截断/跨桥异常), 重发即**二次执行破坏性动作**(重复转曲/重复删除)。
+  //   分流后: 只读照旧重发; 写动作不重发, 置 jsxReady=false(下次调用会带 evalFile 重新加载),
+  //   本次结果仍交回调 ⇒ 调用方按失败处理, 用户再点一次即可。
+  //   ⚠ 宁可让用户多试点一次, 也不能让宿主重复执行不可逆动作。
+  //   注: 正常使用几乎遇不到 —— 新部署 jsx 后面板打开时的自动 run() 是只读探针, 会先把
+  //   jsxReady 刷成新版; 只有"面板开着时热替换 jsx 且用户直接点写动作"才会走这条路径。
+  var READONLY_FNS = ["runPreflight", "pfDocKey", "pfLinkScope", "pfThDefaults"];
+  function execJsx(call, cb, isReadOnly) {
+    if (isReadOnly === undefined) {
+      isReadOnly = false;
+      // v10.39(审查 B8): 判定前先去掉前导空白 —— 原实现要求恰好以 `fn(` 开头, 一旦有人写成
+      //   ' ' + call 或换行拼接就会被判成写动作(只读探针少了 evalFile 重载的机会; 更该防的
+      //   是反方向)。纯防御: 现有调用无一违反, 行为对当前代码完全等价。
+      var callTrim = String(call).replace(/^\s+/, "");
+      for (var ri = 0; ri < READONLY_FNS.length; ri++) {
+        if (callTrim.indexOf(READONLY_FNS[ri] + "(") === 0) { isReadOnly = true; break; }
+      }
+    }
     var withLoad = '$.evalFile("' + jsxFilePath() + '"); ' + call;
     var first = jsxReady ? call : withLoad;
     evalScript(first, function (result) {
       var data = parseResult(result);
       if (data && data.build === JSX_BUILD) { jsxReady = true; cb(data, result); return; }
       if (first === withLoad) { jsxReady = false; cb(data, result); return; } // 已重载仍异常
+      // 走到这里 = 没带 evalFile 却拿到不符的 build ⇒ 引擎里的是旧版 jsx
+      if (!isReadOnly) {
+        jsxReady = false;   // 写动作不重发(上面那次可能已执行); 下次调用重新加载
+        cb(data, result);
+        return;
+      }
       evalScript(withLoad, function (result2) {
         var data2 = parseResult(result2);
         jsxReady = !!(data2 && data2.build === JSX_BUILD);
@@ -167,9 +199,13 @@
   // v4.3: 卡 1 的"CMYK/RGB"徽标配色必须只跟色彩模式状态走,不能继承卡片级别
   //       ——否则出血不足(黄)会把 CMYK 徽标染黄,看起来像"色彩模式有问题"
   // v5.0: 新增 extraChip(可选)— 卡片右上角可并列第二个徽标(如卡1出血不足)
+  // v10.39(审查 B7): 删掉第 7 参 headExtra —— 自 v10.29 叠印卡页签摘除后已**无任何调用点**传值,
+  //   `(headExtra || '')` 恒为空串(逐字节等价)。历史上是 v10.14 给叠印卡 seg 用的。
   function card(title, level, chipText, bodyHtml, chipLevel, extraChip) {
-    return '<div class="card"><div class="card-head"><span>' + esc(title) + "</span><span class='chips'>" +
-      chip(chipLevel || level, chipText) + (extraChip ? extraChip : "") + '</span></div><div class="card-body">' + bodyHtml + "</div></div>";
+    return '<div class="card"><div class="card-head"><span>' + esc(title) + '</span>' +
+      "<span class='chips'>" +
+      chip(chipLevel || level, chipText) + (extraChip ? extraChip : "") + '</span>' +
+      '</div><div class="card-body">' + bodyHtml + "</div></div>";
   }
 
   // v7.0: 标题行 + 右侧样本截断提示(与标题同一行、右对齐、不带括号)
@@ -179,19 +215,29 @@
       (hintText ? '<span class="row-h">' + esc(hintText) + "</span>" : "") + "</div>";
   }
 
-  // ---------- v10.0: 七卡开关(设置弹层) ----------
-  // 卡片顺序与 jsx 的 CK 一一对应: ①ab画板出血 ②hd隐藏 ③ft字体 ④im嵌入 ⑤rs分辨率 ⑥ik油墨描边 ⑦ov叠印
-  var CK_NAMES = ["画板 · 出血 · 色彩", "隐藏图层 · 对象", "字体 · 转曲", "图片嵌入", "图片分辨率", "油墨 · 描边粗细", "叠印"];
+  // ---------- v10.0: 卡片开关(设置弹层) ----------
+  // 卡片顺序与 jsx 的 CK 一一对应: ①ab画板出血 ②hd隐藏 ③ft字体 ④im嵌入 ⑤rs分辨率 ⑥ik油墨描边 ⑦ov叠印 ⑧sw色板
+  // v10.13: 新增第⑧卡「色板」(zhiban v0.7.8 移植)。⚠ 传给 jsx 时 c1..c7 仍是前七张卡,
+  //   色板是第 **9** 个位置参数(第 8 位已被阈值串占用, 见 swArg)。泛化出 CARD_N, 别再散落硬编码 7。
+  //   ⚠ 色板卡**默认不勾**(雪糕点名) —— 老用户 7 位存档不匹配正则 ⇒ 保持默认,
+  //     恰好 = 前七张开 + 色板关, 无需迁移。
+  var CARD_N = 8;
+  var CK_NAMES = ["画板 · 出血 · 色彩", "隐藏图层 · 对象", "字体 · 转曲", "图片嵌入", "图片分辨率", "油墨 · 描边粗细", "叠印", "色板"];
   // v10.1: 卡片显示顺序(位置 -> 卡号)。拖动只改显示; 传给 jsx 的开关仍按固定卡序(ckArgs)
-  var CARD_ORDER = [0, 1, 2, 3, 4, 5, 6];
-  var CARD_CK = [true, true, true, true, true, true, true];
+  var CARD_ORDER = [0, 1, 2, 3, 4, 5, 6, 7];
+  var CARD_CK = [true, true, true, true, true, true, true, false];
+  // v10.33: 叠印版本存档键名上提到常量区(审查 v10.32 第 11 条) —— 原先声明在 readOvpMode 上方
+  //   (IIFE 中部), 赋值在**执行到那一行时**才完成; 若将来有人在 IIFE 早期(赋值前)调
+  //   readOvpMode(), 会读到 undefined。函数声明虽被 hoisting, 但常量不会 —— 挪到这里与 CARD_N 并列。
+  var PF_OVP_MODE_KEY = "pf_ovpMode";
   // SCAN_CK = 本轮扫描实际用的开关快照 —— 渲染占位卡按它判,
   //   避免"扫描后又改勾选"拿旧数据/空数据当新结果显示。
   var SCAN_CK = null;
   try {
     var ckSaved = localStorage.getItem("pf_cards");
-    if (ckSaved !== null && /^[01]{7}$/.test(ckSaved)) {
-      for (var ckI = 0; ckI < 7; ckI++) CARD_CK[ckI] = ckSaved.charAt(ckI) === "1";
+    // v10.13: 只认 8 位。旧版 7 位存档(老用户)不匹配 ⇒ 保持默认(前七开+色板关), 无害。
+    if (ckSaved !== null && /^[01]{8}$/.test(ckSaved)) {
+      for (var ckI = 0; ckI < CARD_N; ckI++) CARD_CK[ckI] = ckSaved.charAt(ckI) === "1";
     }
   } catch (eCK) {}
 
@@ -246,6 +292,8 @@
   }
   // jsx 第 8 参(字符串字面量)。空串 ⇒ jsx 的 pfThApply 逐项回落 PF_TH_DEF
   function thArg() { return '"' + thWire(TH_PREF) + '"'; }
+  // v10.13: 色板卡开关(c9)。⚠ 不能并进 ckArgs —— c8 是阈值串, 并进去会两头一起坏(见 zhiban v10.16 教训)
+  function swArg() { return CARD_CK[7] ? "1" : "0"; }
   function thSave() {
     try {
       var w = thWire(TH_PREF);
@@ -304,11 +352,13 @@
     if (TH_DRAFT && TH_DRAFT[k] !== undefined) return TH_DRAFT[k];
     return thEffV(k);
   }
-  function thDraftInit() {   // 起稿: 全量 7 项(拿不到默认值时退回上次生效值)
+  // v10.37: useDef —— 「重置默认」用它起稿(取 TH_DEF 而非生效值), 使阈值预览回到出厂默认;
+  //   弹层常规打开时不传(用生效值)。起稿: 全量 6 项(TH_KEYS 六项)。
+  function thDraftInit(useDef) {
     TH_DRAFT = {};
     for (var i = 0; i < TH_KEYS.length; i++) {
       var k = TH_KEYS[i];
-      var v = thEffV(k);
+      var v = useDef ? (TH_DEF && TH_DEF[k] !== undefined ? TH_DEF[k] : undefined) : thEffV(k);
       if (v === undefined && PF_TH && PF_TH[k] !== undefined) v = PF_TH[k];
       if (v !== undefined) TH_DRAFT[k] = v;
     }
@@ -330,22 +380,26 @@
     thRefresh();
   }
   // 「重置默认」: 卡片开关全开 + 顺序复原 + 阈值清空(三项一起, 与按钮文案一致)
+  // v10.37: 改为**草稿式** —— 原实现点下即落盘(ckSave/orderSave/thSave), 与"关闭=取消"冲突。
+  //   现只改内存 + 用默认值起阈值草稿; 由「确认」统一落盘, 「关闭」整体回滚。
   function thResetAll() {
     var i;
-    for (i = 0; i < 7; i++) CARD_CK[i] = true;
-    ckSave();
-    CARD_ORDER = [0, 1, 2, 3, 4, 5, 6];
-    orderSave();
-    TH_PREF = null;
-    thSave();
-    thRefresh();
-    thDraftInit();
+    for (i = 0; i < CARD_N - 1; i++) CARD_CK[i] = true;
+    CARD_CK[CARD_N - 1] = false; // v10.13: 色板卡出厂默认关(雪糕点名)
+    // v10.33: 按 CARD_N 生成(审查 v10.32 第 5 条) —— 原先硬编码 8 位, 将来 CARD_N 变 9 会漏。
+    CARD_ORDER = [];
+    for (i = 0; i < CARD_N; i++) CARD_ORDER.push(i);
+    thDraftInit(true);   // 阈值起稿用默认值(不再动 TH_PREF / thSave)
   }
   function fillDraftInputs() {   // 输入框一律显示草稿值
     for (var i = 0; i < TH_FIELDS.length; i++) {
       var k = TH_FIELDS[i].k;
       var el = $("th_" + k);
-      if (el) {
+      // v10.46(审查 P1-2): **跳过当前聚焦的输入框** —— onThChange 每次 change 都会
+      //   全量重填, 对被聚焦框重赋值会把光标推到末尾( editing 中间位置时被打断),
+      //   inkWarn 联动纠正甚至会把用户刚填的值顶掉(见 onThChange 注释)。
+      //   聚焦框的值由用户自己掌控, 失焦/下次进场时自然对齐草稿。
+      if (el && el !== document.activeElement) {
         var v = thDraftV(k);
         el.value = (v === undefined) ? "" : v;
       }
@@ -356,19 +410,34 @@
     var v = parseFloat(inp.value);
     if (!TH_DRAFT) TH_DRAFT = {};
     if (!isNaN(v) && isFinite(v) && v > 0) TH_DRAFT[k] = v; else delete TH_DRAFT[k];
+    // v10.46(审查 P1-2): inkWarn 的纠正**不再写回用户正在编辑的那一项**。
+    //   旧实现纠正后无条件 fillDraftInputs() 全量重填: 用户在 inkWarn 框输入 3 想输
+    //   300, 第一次 change(按 Tab/回车确认值时)就被顶成 inkOk+1(默认 221), 且聚焦框
+    //   value 被重赋值、光标跳尾 —— "想改的数字根本填不进去"。
+    //   现在: 纠正照做(不变量不破), 但正在聚焦的框不重写(fillDraftInputs 已跳过),
+    //   用户继续把 300 输完; 若最终值仍 <= inkOk, 「确认」时 thDraftCommit 之前的
+    //   这一层会在 blur 后重填时体现(那时已不再是聚焦框)。
     var ov = thDraftV("inkOk"), wv = thDraftV("inkWarn");
-    if (ov !== undefined && wv !== undefined && wv <= ov) TH_DRAFT.inkWarn = ov + 1;
+    // v10.60(审查 2.1): 纠正下限与 jsx pfThApply 完全对齐 —— 下限取**默认 inkWarn**
+    //   (TH_DEF.inkWarn, 其唯一真源就是 jsx 的 PF_TH_DEF.inkWarn), 而不是只取 ov+1。
+    //   旧实现两侧不同源: 输入 100|220 前端纠成 221、jsx 却纠成 300 ⇒ 确认后数字再跳一次
+    //   (面板显示与判定不同源)。TH_DEF 尚未就绪(pfThDefaults 还没回)时退回 ov+1,
+    //   至少不破"inkWarn > inkOk"这条不变量。
+    if (ov !== undefined && wv !== undefined && wv <= ov) {
+      var dfltW = (TH_DEF && TH_DEF.inkWarn !== undefined) ? TH_DEF.inkWarn : (ov + 1);
+      TH_DRAFT.inkWarn = Math.max(ov + 1, dfltW);
+    }
     fillDraftInputs();
   }
 
-  // ---------- v10.1: 卡片显示顺序(pf_order, 7 位数字 = 位置 -> 卡号) ----------
+  // ---------- v10.1: 卡片显示顺序(pf_order, 8 位数字 = 位置 -> 卡号; v10.19 起含色板) ----------
   function orderSave() {
     try { localStorage.setItem("pf_order", CARD_ORDER.join("")); } catch (eO) {}
   }
   // 拖动排序用到的两个纯逻辑 + 两个拖拽期变量
   function orderMove(o, from, to) {   // 把 from 位置那张卡挪到 to 位置; 越界/原地返回副本
     var a = o.slice(0);
-    if (from < 0 || from > 6 || to < 0 || to > 6 || from === to) return a;
+    if (from < 0 || from > CARD_N - 1 || to < 0 || to > CARD_N - 1 || from === to) return a;
     var v = a.splice(from, 1)[0];
     a.splice(to, 0, v);
     return a;
@@ -383,20 +452,33 @@
     return n - 1;
   }
   var dragPos = -1, dragMove = null, dragUp = null;
+  // ⚠ v10.33: v10.32 曾在此加 dragTarget/dragDir 想做"插入位指示线", 但那是**死代码** ——
+  //   dragMove 里 dragTarget 与 dragPos 被同时写成 to, 于是 drawRows 的
+  //   `pos !== dragPos` 恒为 false, 指示线永不显示(外部审查 v10.32 第 1 条实锤)。
+  //   已整体删除(变量 / drawRows 分支 / CSS 两条 .drop-above/.drop-below)。
+  //   当前是「实时换位」交互: 被拖的那一行自己跟着光标走 + .dragging 高亮, 足够表意;
+  //   插入位指示线是「松手才落位」模式才需要的, 这里本就不该有。
   try {
     var oSaved = localStorage.getItem("pf_order");
-    if (oSaved && /^[0-6]{7}$/.test(oSaved)) {
+    // v10.19: 兼容两种存档 —— 旧 7 位(0~6, 老用户)末尾补卡号 7; 新 8 位(0~7)直接用。
+    //   之前只认 7 位 ⇒ 拖动保存的 8 位顺序永远读不回来, 色板卡也排不了序。
+    if (oSaved && /^[0-6]{7}$/.test(oSaved)) oSaved = oSaved + "7";
+    if (oSaved && /^[0-7]{8}$/.test(oSaved)) {
       var oArr = [], oOk = true, oK, oV;
-      for (oK = 0; oK < 7; oK++) {
+      for (oK = 0; oK < CARD_N; oK++) {
         oV = parseInt(oSaved.charAt(oK), 10);
-        if (oArr.indexOf(oV) >= 0) { oOk = false; break; }   // 必须是不重复的 0~6 全排列
+        if (oArr.indexOf(oV) >= 0) { oOk = false; break; }   // 必须是不重复的 0~7 全排列
         oArr.push(oV);
       }
-      if (oOk && oArr.length === 7) CARD_ORDER = oArr;
+      if (oOk && oArr.length === CARD_N) CARD_ORDER = oArr;
     }
   } catch (eO2) {}
 
   function ckArgs() {
+    // ⚠ v10.33: 硬编码 7 是**刻意**的(审查 v10.32 第 6 条) —— 前七张卡走 c1..c7;
+    //   c8 是阈值串(第 8 参 pfThApply)、c9 是色板开关(见 swArg)。**不要改成 CARD_N-1**:
+    //   色板卡走 c9, 一旦挤进 c8 位就会把阈值串冲掉, 全卡判定按错位线序读参数
+    //   (zhiban 侧 v10.16 的错位事故同因)。
     var a = [], i;
     for (i = 0; i < 7; i++) a.push(CARD_CK[i] ? 1 : 0);
     return a.join(",");
@@ -404,42 +486,77 @@
   function ckSave() {
     try {
       var t = "", i;
-      for (i = 0; i < 7; i++) t += CARD_CK[i] ? "1" : "0";
+      for (i = 0; i < CARD_N; i++) t += CARD_CK[i] ? "1" : "0";
       localStorage.setItem("pf_cards", t);
     } catch (eP) {}
   }
-  // 已关闭的卡: 灰化占位(样式 .card-off / .chip.off), 不渲染任何数据
+  // 已关闭的卡: 不再渲染(v10.51 雪糕定)。
+  //   原先返回一张灰化占位卡(.card-off / .chip.off): 卡头挂「已关闭」徽标, 卡体写
+  //   "本轮未检查。在「设置」里勾选后点「开始检查」。"。雪糕要求"关掉的直接删掉, 不用再显示已关闭"。
+  //   现统一返回空串 —— 末尾拼接用的 `cards[CARD_ORDER[_oi]] || ""` 会自然跳过该卡。
+  //   ⚠ 函数名与 8 处调用点**保留**: 回归用例钉的就是 offCard(...) 这个调用形态
+  //     (outline-regression 的 v10.0 卡名 / v10.13 色板 / v10.14+v10.29 叠印段), 删函数要连测试一起改。
+  //     .card.card-off 与 .chip.off 两条 CSS 也保留备用 —— 要恢复占位态, 把下面 return 换回原 markup 即可。
+  //   ⚠ 副作用: 若八张卡全关, #results 会是空的(本函数不再提供那句引导文案)。
   function offCard(title) {
-    return '<div class="card card-off"><div class="card-head"><span>' + esc(title) +
-      '</span><span class="chips"><span class="chip off">已关闭</span></span></div>' +
-      '<div class="card-body"><span class="dim">本轮未检查。在「设置」里勾选后点「开始检查」。</span></div></div>';
+    void title;
+    return "";
   }
 
   // 设置弹层: 勾选行按真实卡序生成(卡片名只在 CK_NAMES 维护一份, 与 es 侧同序)
   function initSettings() {
     var list = $("setList"), mask = $("setMask");
     if (!list || !mask) return;
-    // v10.1: 关闭 = 放弃未确认的阈值草稿(开关与顺序是即时的, 不受影响)
-    function closeSet() { thDraftDiscard(); mask.classList.add("hidden"); }
+    // v10.1: 关闭 = 放弃未确认的草稿
+    // v10.37: 改为**整体**回滚/落盘 —— 原先只有阈值走草稿(开关与顺序即时落盘), 导致雪糕点
+    //   「关闭」时上面的改动照样生效、"关闭"和"确认"看着一样。现在四项(卡片开关 / 顺序 /
+    //   叠印版本 / 阈值)统一: commit=true 全部落盘, commit=false 全部回滚到进场快照。
+    function closeSet(commit) {
+      if (commit) {
+        ckSave();                                   // 卡片开关 → pf_cards
+        orderSave();                                // 卡片顺序 → pf_order
+        // v10.43(P1-b): 落盘取草稿 SET_OVP(没改过则用进场快照), 快照本身永不被写
+        if (SET_SNAP) writeOvpMode(SET_OVP !== null ? SET_OVP : SET_SNAP.ovp);   // 叠印版本 → pf_ovpMode
+        thDraftCommit();                            // 阈值 → pf_th
+      } else {
+        // 回滚: 开关 / 顺序 复位; 叠印 UI 复位(localStorage 本就未动); 阈值草稿丢弃
+        if (SET_SNAP) {
+          CARD_CK = SET_SNAP.ck.slice();
+          CARD_ORDER = SET_SNAP.order.slice();
+          applyOvpModeUI(SET_SNAP.ovp);
+        }
+        thDraftDiscard();
+      }
+      // v10.43(P1-b): 撤草稿同撤快照; 回滚用的 SET_SNAP.ovp 现在是干净的进场原值
+      SET_SNAP = null;
+      SET_OVP = null;
+      mask.classList.add("hidden");
+    }
 
     // v10.1: 勾选行按 CARD_ORDER 渲染(卡号 i 仍对应 jsx 的 c1..c7)。
     //   「①②③」序号已去掉; 顺序由右侧抓手**拖动**调整(初版的 ↑↓ 已按雪糕要求撤掉)。
     function drawRows() {
       var h = "", pos, i;
-      for (pos = 0; pos < 7; pos++) {
+      // v10.19: 7 → CARD_N。v10.13 加色板卡时这里漏改, 设置弹层永远只显示前七张卡,
+      //   色板开关不出现在列表里 ⇒ 默认关且无法打开(雪糕截图定位)。
+      for (pos = 0; pos < CARD_N; pos++) {
         i = CARD_ORDER[pos];
         h += '<div class="set-row' + (pos === dragPos ? " dragging" : "") + '">' +
           '<label class="set-ck"><input type="checkbox" id="ck' + (i + 1) + '">' +
-          "<span>" + esc(CK_NAMES[i]) + "</span></label>" +
+          "<span>" + esc(CK_NAMES[i]) + "</span>" +
+          // v10.31: 叠印滑块挂在卡名 span **之后**、label 之内(雪糕点名: 放到"叠印"文案后面)。
+          //   独立节点不受卡名省略号影响 —— 长卡名让位省略, 滑块始终可见。
+          (i === 6 ? ovpSeg() : "") + "</label>" +
           '<span class="grip" data-grip="' + pos + '" title="按住拖动，调整卡片上下顺序"></span></div>';
       }
       list.innerHTML = h;
-      for (pos = 0; pos < 7; pos++) {
+      for (pos = 0; pos < CARD_N; pos++) {
         (function (idx) {
           var box = $("ck" + (idx + 1));
           if (!box) return;
           box.checked = CARD_CK[idx];
-          box.onchange = function () { CARD_CK[idx] = box.checked; ckSave(); };
+          // v10.37: 只改内存(不 ckSave) —— 落盘统一由「确认」做, 「关闭」回滚
+          box.onchange = function () { CARD_CK[idx] = box.checked; };
         })(CARD_ORDER[pos]);
       }
     }
@@ -451,23 +568,25 @@
       dragPos = -1;
       if (dragMove) { document.removeEventListener("mousemove", dragMove); dragMove = null; }
       if (dragUp) { document.removeEventListener("mouseup", dragUp); dragUp = null; }
-      orderSave();
+      // v10.37: 不 orderSave —— 顺序落盘统一由「确认」做
       drawRows();
     }
     list.addEventListener("mousedown", function (e) {
       var t = e.target;
       if (!t || !t.getAttribute || t.getAttribute("data-grip") === null) return;
       var p = parseInt(t.getAttribute("data-grip"), 10);
-      if (isNaN(p) || p < 0 || p > 6) return;
+      if (isNaN(p) || p < 0 || p > CARD_N - 1) return;
       dragPos = p;
       drawRows();          // 让被拖的那行带上 .dragging
       e.preventDefault();  // 别顺手选中文字
       dragMove = function (ev) {
         if (dragPos < 0) return;
         var to = posFromY(list, ev.clientY);
-        if (to < 0 || to === dragPos) return;
-        CARD_ORDER = orderMove(CARD_ORDER, dragPos, to);
-        dragPos = to;
+        if (to < 0 || to > CARD_N - 1) return;
+        if (to !== dragPos) {
+          CARD_ORDER = orderMove(CARD_ORDER, dragPos, to);
+          dragPos = to;
+        }
         drawRows();
       };
       dragUp = function () { endDrag(); };
@@ -483,7 +602,10 @@
       for (i = 0; i < TH_FIELDS.length; i++) {
         h += '<label class="th-row"><span class="th-name">' + esc(TH_FIELDS[i].label) + "</span>" +
           '<input type="number" class="th-in" id="th_' + TH_FIELDS[i].k + '"' +
-          ' step="' + TH_FIELDS[i].step + '" min="0">' +
+          // v10.46(审查 P1-2 次要问题): min 0 -> 1 —— jsx 的 pfThApply 对 <=0 的值
+          // 逐项回落默认(填 0 = 静默用默认值, 无任何提示); 步进箭头到 1 为止,
+          // 想回默认直接清空(缺项留空 = 回落默认, 语义一致且可见。
+          ' step="' + TH_FIELDS[i].step + '" min="1">' +
           // v10.1: 单位列**无条件**生成(空就空着) —— 否则没单位的两行少一个节点,
           //   在 flex space-between 下输入框会被推到更靠右, 7 行左边界就不齐了。
           '<span class="th-unit">' + (TH_FIELDS[i].unit || "") + "</span>" +
@@ -505,9 +627,14 @@
 
     var gear = $("btnSet");
     if (gear) gear.addEventListener("click", function () {
+      // v10.37: 进场快照 —— 三项即时项的"当时值", 供「关闭」整体回滚
+      // v10.43(P1-b): 每次进场先把叠印草稿清空(上一次弹层可能改过没确认)
+      SET_OVP = null;
+      SET_SNAP = { ck: CARD_CK.slice(), order: CARD_ORDER.slice(), ovp: readOvpMode() };
       mask.classList.remove("hidden");
       thDraftInit();                    // 以"当前生效值"起稿
       drawRows(); drawTh(); fillDraftInputs();
+      applyOvpModeUI(SET_SNAP.ovp);     // v10.37: 确保卡体显隐 / seg 选中态与快照一致
       // v10.1: 默认值要到 jsx 才拿得全, 改成**第一次打开弹层**才问 ——
       //   面板一打开就自动扫描, 那次 res.th 已经把阈值带回来了, 所以正常路径下这里同步返回,
       //   不再多跑一次 jsx 解析(初版放在启动时, 会和自动扫描各 evalFile 一遍)。
@@ -519,8 +646,7 @@
     // v10.1: 「确认」= 草稿落盘并关闭(阈值不会边打边存)
     var okSet = $("setOk");
     if (okSet) okSet.addEventListener("click", function () {
-      thDraftCommit();
-      closeSet();
+      closeSet(true);   // v10.37: 落盘(卡片开关 / 顺序 / 叠印版本 / 阈值)
       showNotice("设置已保存，点「开始检查」生效。");
     });
     // v10.2: 「重置默认」点下**直接重置**(雪糕要求去掉确认弹窗) ——
@@ -529,14 +655,16 @@
     if (rstSet) rstSet.addEventListener("click", function () {
       thResetAll();
       drawRows(); drawTh(); fillDraftInputs();
-      showNotice("已恢复默认设置，点「开始检查」生效。");
+      // v10.37: 重置只改草稿 ⇒ 提示改为"尚未保存"
+      showNotice("已恢复默认(尚未保存)，点「确认」后生效。");
     });
+    // v10.37: 关闭 / 点遮罩 / Esc 一律**回滚**(closeSet(false)) —— 与「确认」明确区分
     var clo = $("setClose");
-    if (clo) clo.addEventListener("click", closeSet);
-    mask.addEventListener("click", function (e) { if (e.target === mask) closeSet(); });
+    if (clo) clo.addEventListener("click", function () { closeSet(false); });
+    mask.addEventListener("click", function (e) { if (e.target === mask) closeSet(false); });
     // v10.2: 重置不再弹确认框 ⇒ 去掉原先"ESC 先让位给确认框"那层判断(设置弹层里不会再压别的弹层)
     document.addEventListener("keydown", function (e) {
-      if (e.keyCode === 27 && !mask.classList.contains("hidden")) closeSet();
+      if (e.keyCode === 27 && !mask.classList.contains("hidden")) closeSet(false);
     });
   }
 
@@ -548,6 +676,23 @@
   //   旧版超时后按钮立即恢复可点,再点会把 runPreflight() 排队再跑一遍(总耗时翻倍、
   //   两次结果先后覆盖渲染)。scanBusy 期间忽略点击,并给一句提示,免得"点了没反应"。
   var scanBusy = false;
+
+  // v10.42: 高度占位 —— 防"点完按钮页面跳回最上面"(雪糕反馈)。
+  //   根因: run() 一进来就把 #results / #foot 清空, 文档高度瞬间塌到只剩顶栏,
+  //     浏览器随即把 scrollTop 夹回 0(滚动位置就此丢失); 几十~几百毫秒后结果回填、
+  //     高度恢复, 但位置已经回不去了 ⇒ 表现为"点一下按钮, 页面跳回顶部"。
+  //   修法: 清空前把两者当前高度锁成 min-height 占位, 渲染完成后再撤掉 ——
+  //     全程高度不塌 ⇒ 滚动位置天然保持。
+  //   ⚠ 不用"记忆 scrollTop 再 scrollTo 回填": 那样在清空→回填之间会出现
+  //     "先跳到顶、再跳回来"的可见闪动(扫描耗时越长越明显), 比现在更糟。
+  function holdHeight(el) {
+    if (!el) return;
+    try { el.style.minHeight = el.offsetHeight + "px"; } catch (eH) {}
+  }
+  function releaseHeight(el) {
+    if (!el) return;
+    try { el.style.minHeight = ""; } catch (eR) {}
+  }
   // v8.8: 加 keepError —— 一键操作失败时 execAction 先 showError 再刷新结果，
   //   而 run() 一进来就把 #error 加 hidden ⇒ 失败原因瞬间被抹掉、用户只看到新一轮结果。
   function run(keepNotice, keepError) {
@@ -559,15 +704,22 @@
     scanBusy = true;
     $("btnRun").disabled = true;
     $("loading").classList.remove("hidden");
-    $("error").classList.add("hidden");
+    // v10.35(审查 #7): 删掉此处的**无条件**隐藏 —— 它把下方 `if (!keepError)` 直接废掉,
+    //   v8.8 加 keepError 时漏删这一行 ⇒ 一键操作失败(转曲/嵌入/清叠印)时 execAction 刚
+    //   showError 的红条, 被随后的 run(true,true) 一进来就抹掉, 用户看不到失败原因、重复操作。
+    //   现在只有 keepError 为假才隐藏(手动点"开始检查"时仍清残留)。
     // v5.2: 顺带清掉残留的旧成功提示,避免绿条挂在新一轮结果上
     // v8.0: 操作后刷新时保留(keepNotice=true)
     if (!keepNotice) $("notice").classList.add("hidden");
     if (!keepError) $("error").classList.add("hidden");
+    // v10.42: 清空前先占住高度, 否则页面塌高 ⇒ 滚动位置被夹回顶部(见 holdHeight 注释)
+    holdHeight($("results"));
+    holdHeight($("foot"));
     $("results").innerHTML = "";
     $("foot").innerHTML = "";
 
     var timedOut = false;
+    var graceTimer = null;
     var timer = setTimeout(function () {
       timedOut = true;
       $("loading").classList.add("hidden");
@@ -576,27 +728,42 @@
       // v8.1: 措辞改为"仍在继续" —— ExtendScript 无多线程,JSX 一旦开跑就停不下来;
       //   旧版在此宣告超时、回调又 `if (timedOut) return` 把已算完的结果丢掉 ⇒ 白转一场。
       showError("扫描时间较长(超过 " + (BUSY_TIMEOUT_MS / 1000) + " 秒)。文档对象可能较多，后台仍在继续，完成后会自动显示结果。");
+      // v10.60(审查 2.5): 兜底解锁 —— 这里**不立即** scanBusy=false: 那是 v8.6 的"防双扫"
+      //   口径(jsx 停不下来, 期间放行会让两次扫描各自渲染一遍)。但若 jsx 真挂死
+      //   (回调永不返回), scanBusy 会永久为真 ⇒ 按钮虽已恢复、点下去只弹"正在检查中",
+      //   面板等于锁死。故再挂一枚宽限计时器: 宽限期内回调到达即被 clearTimeout(见回调开头);
+      //   仍未回 ⇒ 强解锁, 面板恢复可用(代价是极端情况可能多渲染一次, 可接受)。
+      graceTimer = setTimeout(function () { scanBusy = false; }, BUSY_TIMEOUT_MS);
     }, BUSY_TIMEOUT_MS);
 
     SCAN_CK = CARD_CK.slice(0); // v10.0: 记录本轮扫描用的开关快照(渲染占位卡按它判)
     // v10.1: 第 8 参 = 阈值串(空串则由 jsx 用 PF_TH_DEF 默认值)
-    execJsx("runPreflight(" + ckArgs() + "," + thArg() + ");", function (data, raw) {
+    execJsx("runPreflight(" + ckArgs() + "," + thArg() + "," + swArg() + ");", function (data, raw) {
       // v8.1: 不再因超时丢弃迟到的结果 —— 照常渲染,并补一条"耗时较长"提示
       scanBusy = false;   // v8.6: 必须先解锁再分支 —— 下面有提前 return,漏了就锁死面板
       clearTimeout(timer);
+      if (graceTimer) clearTimeout(graceTimer);   // v10.60(审查 2.5): 撤掉超时兜底计时器
       $("btnRun").disabled = false;
       $("loading").classList.add("hidden");
-      if (!data || !data.ok) {
-        showError((data && data.error) ? data.error
-          : ("脚本执行失败。请确认扩展目录中的 jsx/preflight.jsx 存在。返回: " +
-             String(raw).substring(0, 120)));
-        return;
-      }
+      // v10.43(审查 P0): 成败两条路都要撤占位 —— 包一层 try/finally。
+      //   失败分支的 return 原先直接跳过释放, #results 会留着上一轮高度的
+      //   min-height, 下轮清空后成为"空高块", 又把滚动位置钉在错误的位置。
       try {
-        render(data);
-        if (timedOut) showNotice("扫描耗时较长，结果已更新。");
-      } catch (renderErr) {
-        showError("渲染出错 [" + JS_BUILD + "]: " + renderErr.message);
+        if (!data || !data.ok) {
+          showError((data && data.error) ? data.error
+            : ("脚本执行失败。请确认扩展目录中的 jsx/preflight.jsx 存在。返回: " +
+               String(raw).substring(0, 120)));
+          return;
+        }
+        try {
+          render(data);
+          if (timedOut) showNotice("扫描耗时较长，结果已更新。");
+        } catch (renderErr) {
+          showError("渲染出错 [" + JS_BUILD + "]: " + renderErr.message);
+        }
+      } finally {
+        releaseHeight($("results"));
+        releaseHeight($("foot"));
       }
     });
   }
@@ -642,7 +809,7 @@
           (d.symbols.truncated ? "(仅扫描前 " + thv("scan") + " 个)"
             : (d.symbols.scanned ? "(已扫描内部内容)" : "(内部不可访问)")) + "</span>" : "");
 
-    var cards = [];   // v10.1: 七张卡先各存一格, 最后按 CARD_ORDER 拼接(见函数末尾)
+    var cards = [];   // v10.1: 每卡先各存一格(v10.13 起八张), 最后按 CARD_ORDER 拼接(见函数末尾)
     // v10.0: 按"本轮扫描用的开关快照"判定占位卡(扫描后又改勾选不会拿旧数据当新结果显示)
     var scanCk = SCAN_CK || CARD_CK;
 
@@ -659,8 +826,8 @@
     // 出血不足 3mm 的画板名单(v3.4: 多画板文档逐板实测,只列有问题的)
     var bleedHtml = "";
     var bl = (d.bleed && d.bleed.artboards) ? d.bleed : null;
+    var badAbs = [];   // v10.28
     if (bl && bl.supported) {
-      var badAbs = [];
       for (var bi = 0; bi < bl.artboards.length; bi++) {
         var ba = bl.artboards[bi];
         if (ba.insufficient) {
@@ -722,6 +889,15 @@
       // v5.18: "隐藏内容不会出现在导出结果中…"提示灰字按用户要求移除
       // v7.1: 配额提示去掉"对象过多,"前缀(与"仅扫描前 N"语义重复)
       if (hd.truncated) hdHtml += '<div class="dim">(仅扫描前 ' + thv("scan") + ' 个)</div>';
+      // v10.15: 「删除全部隐藏对象」按钮(zhiban 同源移植) —— 只删对象, 隐藏图层本身保留。
+      //   仅在**可见图层内确有隐藏对象**(itemCount>0)时显示 —— 隐藏图层的对象不在删除范围,
+      //   若隐藏内容全来自隐藏图层, 按钮点了也无目标 ⇒ 不显示, 避免误导。
+      var hdDeletable = (hd.itemCount || 0) > 0;
+      if (hdDeletable) {
+        hdHtml += '<div class="action-row"><button class="btn-action" id="btnDelHidden">删除全部隐藏对象</button></div>';
+      } else if ((hd.hiddenLayerItems || 0) > 0) {
+        hdHtml += '<div class="dim">隐藏内容均位于隐藏图层内，不在删除范围</div>';
+      }
     }
     // v5.20: 有隐藏内容时徽标转红(左边条维持黄色,仅徽标级别改 bad)
     cards[1] = scanCk[1] ? card("隐藏图层 · 对象", hdLevel, hdTotal > 0 ? hdTotal + " 个" : "无", hdHtml, hdTotal > 0 ? "bad" : "ok")
@@ -796,7 +972,8 @@
       fHtml += '另有 <b class="warn-t">' + htx.count + "</b> 个隐藏文字未转曲" +
         (htx.missingCount > 0 ? "(缺字体 <b class='bad-t'>" + htx.missingCount + "</b> 个)" : "") +
         '，勾选"显示全部"可一并转曲。';
-      if (htx.truncated) fHtml += '<div class="dim">(仅统计前 500 个)</div>';
+      // v10.39(审查 B6): 500 不再写死 —— 改读 jsx 下发的 htx.cap(唯一真源 = PF_TH_DEF.htCap)
+      if (htx.truncated) fHtml += '<div class="dim">(仅统计前 ' + htx.cap + " 个)</div>";
     }
     // v5.24: 徽标合并计数——可见未转曲 + 隐藏文字合并为一个"未转曲 N 个"
     var totalOutline = d.fonts.totalText + (htx ? htx.count : 0);
@@ -856,7 +1033,10 @@
     var rsLevel = rs.lowCount > 0 ? "warn" : "ok";
     var rsHtml = "";
     if (rs.total === 0) {
-      rsHtml = '文档<span class="dim">无位图</span>。';
+      // v10.52(雪糕定): "无位图"由灰(.dim #a8a8a8)改白(.good #e6e6e6) ——
+      //   与同类"什么都没有"的正常态语句对齐: 卡②"无 隐藏图层 / 隐藏对象。"、
+      //   卡⑦"文档无叠印。"都是白, 原先这里一个灰两个白, 口径不一致。
+      rsHtml = '文档<b class="good">无位图</b>。';
     } else {
       // v7.0: 截断提示与汇总行同一行、右对齐
       var rsHint = (rs.lowCount > rs.samples.length) ? "仅列出前 " + thv("cap") + " 张" : "";
@@ -1071,10 +1251,22 @@
     var ovpW = ovp.white || 0, ovpTx = ovp.text || 0, ovpPth = ovp.path || 0;
     // v9.6: 其中落在锁定对象/图层/锁定组里的处数(旧 jsx 无此键 ⇒ ||0, 否则 if(undefined>0) 恒假、静默不显示)
     var ovpLocked = ovp.locked || 0;
+    // v10.14: 四分类计数(旧 jsx 无 k100/spot/color 键 ⇒ ||0, 否则 NaN 恒假导致静默不显示)
+    var ovpK100 = ovp.k100 || 0, ovpSpot = ovp.spot || 0, ovpColor = ovp.color || 0;
+    // v10.35(审查 #4): 叠印扫描是否被配额截断 —— 截断且 count=0 时**不能**说"无叠印"
+    //   (漏检报通过是印刷上最危险的假阳性)。旧 jsx 无此键 ⇒ undefined, 走 !=== true 判否。
+    // v10.36(审查 v10.35): 截断且 count>0 的两分支也要处理 —— v10.35 只补了 count=0 分支,
+    //   漏了"前 N 个已命中若干处、后面的没扫完" ⇒ 用户看到"叠印 8 处"就以为只有 8 处
+    //   (漏检报部分, 比"报无"轻但同样是失真)。徽标加 "+" 表示"至少 N", 并补一行灰字说明。
+    var ovpTrunc = (ovp.truncated === true);
     var oHtml = "", oLevel = "ok", oChip = "无叠印";
     if (ovpN > 0) {
       oLevel = "bad";
-      oChip = "叠印 " + ovpN + " 处";
+      // v10.22: 徽标并单枚(雪糕点名, 参考分级版"需处理 N · 正常 N"形态) ——
+      //   "叠印 N 处" + 副徽标"白叠印 N 处" 两枚太长 ⇒ "叠印 N · 白 N" 一枚。
+      //   危害说明不丢: 卡内汇总行"白色 N"仍带 title 悬停提示。
+      // v10.36: 截断时数字加 "+" —— "叠印 8+" 一眼看出"不止这些"。
+      oChip = "叠印 " + ovpN + (ovpTrunc ? "+" : "") + (ovpW > 0 ? " · 白 " + ovpW : "");
       var oRows = (ovp.samples || []).map(function (s) {
         return { l: s.src === "text" ? "文字" : "图形", s: s };
       });
@@ -1087,6 +1279,11 @@
         (ovpW > 0 ? ' · <span title="白色叠印后不再遮挡下层，印出来会花">白色 <b class="bad-t">' + ovpW + "</b></span>" : ""),
         ovpN > oOut.shown ? "仅列出前 " + thv("cap") + " 处" : "");
       oHtml += oOut.html;
+      // v10.36: 截断说明 —— 放在样本之后、动作区之前(先让用户看清已找到的, 再提示还有没扫完的)
+      if (ovpTrunc) {
+        oHtml += '<div class="dim">扫描达上限，叠印数可能不止 <b class="warn-t">' + ovpN +
+          "</b> 处，未扫完的部分需人工复核。</div>";
+      }
       // v9.7: 「其中白色叠印 N 处(…印出来会花)。」整行删除 —— 白色已并入上方标题行,
       //   危害说明移入该段的 title, 不再占用卡片高度。
       // v9.4: 有叠印才给按钮(无叠印时按一下纯属多余)
@@ -1098,6 +1295,11 @@
         '</div>' +
         '<button class="btn-action" id="btnOvpClear">一键清除叠印</button>' +
         '</div>';
+    } else if (ovpTrunc) {
+      // v10.35(审查 #4): 扫描达配额上限且未命中叠印 —— 不能说"无", 只能报"未完成"(灰徽标)。
+      oLevel = "warn"; oChip = "未完成";
+      oHtml = '已检查范围内<b class="warn-t">无叠印</b>，但扫描达上限，检查未完成。' +
+        '<br><span class="dim">文档对象数超过本次扫描配额，可能有叠印未被扫到。</span>';
     } else {
       oHtml = '文档<b class="good">无叠印</b>。';
     }
@@ -1105,18 +1307,131 @@
     // v9.7: 删掉独立的「其中锁定对象 N 处…」灰字行 —— 锁定处数已并入上方标题行,
     //   "勾选「解锁全部」可一并清除"移作该段的 title 悬停提示(卡片省一行)。
     oHtml += '<div class="dim">隐藏对象与图层不参与叠印检查。</div>';
-    // 副徽标(第 6 参): 只有真出现白色叠印才挂,文案带数量便于一眼定量
-    //   v9.7: 原先那行「其中白色叠印 N 处(…印出来会花)」已删除, 危害说明改挂 title
+    // v10.22: 副徽标(第 6 参)废弃 —— 白色计数已并入主徽标("叠印 N · 白 N"), 危害说明留在汇总行 title。
+    var oExtra = "";
+
+    // ---------- v10.14: 分级版卡体(四分类 + 规则动作; zhiban v0.7.x 同款, 全角已转半角) ----------
+    //   口径: 单黑(k100)/专色(spot)=正常; 纯白(white)/彩色(color)=需处理。
+    //   需处理 >0 才显示勾选区与按钮; 徽标「需处理 N · 正常 N」(zhiban v0.7.4 雪糕选定形态)。
+    var tClsRow = function (n, label, tip, cls) {
+      var c = n > 0 ? cls : "dim";
+      return '<div' + (tip ? ' title="' + tip + '"' : "") + '><b class="' + c + '">' + n + '</b> 个' + label + "</div>";
+    };
+    var tHtml = "", tLevel = "ok", tChip = "无叠印";
+    if (ovpN > 0) {
+      var tNeedN = ovpW + ovpColor, tNormN = ovpK100 + ovpSpot;
+      tLevel = (ovpW > 0 || ovpColor > 0) ? "bad" : "ok";
+      // v10.36: 截断时两个计数都只是下限 ⇒ 各加 "+"(与简洁版同口径)
+      tChip = "需处理 " + tNeedN + (ovpTrunc ? "+" : "") + " · 正常 " + tNormN + (ovpTrunc ? "+" : "");
+      tHtml += '<div class="ovp-cls">' +
+        tClsRow(ovpK100, "单黑叠印", "C0 M0 Y0 K100：压印后不再镂空，避免套印露白(正常)", "good") +
+        tClsRow(ovpSpot, "专色叠印", "专色 / 渐变 / 图案上的叠印(正常)", "good") +
+        tClsRow(ovpW + ovpColor, "需处理叠印",
+          "纯白叠印 " + ovpW + " 个(白色叠印后不再遮挡下层，印出来会花)；" +
+          "彩色叠印 " + ovpColor + " 个(其余 CMYK / RGB 叠印)", "bad-t") +
+        "</div>";
+      if (ovpLocked > 0) {
+        tHtml += '<div class="dim">其中 <b class="warn-t">' + ovpLocked +
+          '</b> 处位于锁定对象/图层，勾选「解锁全部」可一并处理。</div>';
+      }
+      tHtml += oOut.html;   // 样本行与简洁版同源(同一批样本, 不重复扫描)
+      // v10.36: 截断说明(与简洁版同口径)
+      if (ovpTrunc) {
+        tHtml += '<div class="dim">扫描达上限，叠印数可能不止 <b class="warn-t">' + ovpN +
+          "</b> 处，未扫完的部分需人工复核。</div>";
+      }
+      if (ovpW > 0 || ovpColor > 0) {
+        // 动作区 id 加 t 前缀: 与简洁版的 chkOvpUnlock/btnOvpClear 区分(两版同时渲染进 DOM)
+        tHtml += '<div class="action-row"><div class="chk-row">' +
+          '<label class="chk" title="清除需处理叠印(纯白 C0M0Y0K0 + 彩色 CMYK/RGB)对象的填充与描边叠印"><input type="checkbox" id="tChkClearWhite"> 清除需处理叠印</label>' +
+          '<label class="chk" title="为单黑(C0M0Y0K100)对象的填充与描边新增叠印"><input type="checkbox" id="tChkAddK100"> 单黑加叠印</label>' +
+          '<label class="chk" title="执行前先解锁全部图层、对象级锁定(Ctrl+2)与锁定组；隐藏对象一律不碰"><input type="checkbox" id="tChkOvpUnlock"> 解锁全部</label>' +
+          '</div><button class="btn-action" id="tBtnOvpApply">执行勾选项</button></div>';
+      }
+    } else if (ovpTrunc) {
+      // v10.35(审查 #4): 与简洁版同口径 —— 截断且未命中时不报"无", 报"未完成"
+      tLevel = "warn"; tChip = "未完成";
+      tHtml = '已检查范围内<b class="warn-t">无叠印</b>，但扫描达上限，检查未完成。' +
+        '<br><span class="dim">文档对象数超过本次扫描配额，可能有叠印未被扫到。</span>';
+    } else {
+      tHtml = '文档<b class="good">无叠印</b>。';
+    }
+    tHtml += '<div class="dim">隐藏对象与图层不参与叠印检查。</div>';
+
+    // 两版同时渲染进 #ovpDual, data-m 决定显隐(CSS); 选择记 pf_ovpMode, 默认 legacy(简洁版)
+    var ovpMode = readOvpMode();   // v10.32: 统一读取口(审查 #13)
+    // ⚠ card() 写死 class="card", 两份卡需各自带 ovp-legacy / ovp-tiered 类供 CSS 切显隐;
+    //   卡体内部不含该字面量, replace 首个(也唯一)开标签安全。
+    // v10.29: 卡头 seg 页签摘除(雪糕点名) —— 版本选择移到设置弹层「叠印」行卡名后;
+    //   v10.31: 卡头标题补版本后缀「叠印 · 全清理 / 叠印 · 分级版」(根据当前选择)。
+    var legacyCard = card("叠印 · 全清理", oLevel, oChip, oHtml, null, oExtra)
+      .replace('<div class="card">', '<div class="card ovp-legacy">');
+    var tieredCard = card("叠印 · 分级版", tLevel, tChip, tHtml, null, "")
+      .replace('<div class="card">', '<div class="card ovp-tiered">');
     cards[6] = scanCk[6]
-      ? card("叠印", oLevel, oChip, oHtml, null,
-          ovpW > 0 ? '<span class="chip bad" title="白色叠印后不再遮挡下层，印出来会花">白叠印 ' + ovpW + " 处</span>" : "")
+      ? '<div class="ovp-dual" id="ovpDual" data-m="' + ovpMode + '">' + legacyCard + tieredCard + "</div>"
       : offCard("叠印");
 
+    // ===== 8. 色板 (zhiban v10.16/v0.7.8 移植) =====
+    //   展示: 色板 / 渐变 / 图案 / 颜色组 的总数 · 在用 · 未使用; 未使用超 0 挂清理按钮。
+    //   ⚠ jsx 侧这些字段只在卡⑧开启时才存在 —— 关掉(或旧版 jsx)一律当 null,
+    //     不参与任何算术(NaN 会让 if 恒假 ⇒ 静默空白)。
+    var sw = d.swatch || null;
+    var gd = d.gradient || null;
+    var pt = d.pattern || null;
+    var sg = d.swatchGroup || null;   // 颜色组(旧版 jsx / 不支持时=null)
+    var sHtml = "", sLevel = "ok", sChip = "无未使用";
+    var sUnusedSw = 0, sUnusedGd = 0, sUnusedPt = 0, sAnyData = false;
+    if (sw) { sAnyData = true; sUnusedSw = sw.unused || 0; }
+    if (gd) { sAnyData = true; sUnusedGd = gd.unused || 0; }
+    if (pt) { sAnyData = true; sUnusedPt = pt.unused || 0; }
+    var sUnusedTotal = sUnusedSw + sUnusedGd + sUnusedPt;
+    if (sAnyData) {
+      if (sUnusedTotal > 0) { sLevel = "bad"; sChip = "未使用 " + sUnusedTotal + " 个"; }
+      var rows = [];
+      function lineOf(label, o) {
+        if (!o) return "";
+        var t = o.total || 0, u = o.used || 0, un = o.unused || 0;
+        var txt = label + " <b class='white'>" + t + "</b> 个 · 在用 <b class='good'>" + u +
+          "</b> 个" + (un > 0 ? " · 未使用 <b class='bad-t'>" + un + "</b> 个" : " · <b class='good'>全部在用</b>");
+        return "<div>" + txt + "</div>";
+      }
+      rows.push(lineOf("色板", sw));
+      rows.push(lineOf("渐变", gd));
+      rows.push(lineOf("图案", pt));
+      // 颜色组只报告数量(v0.7.8: AI 28 的 SwatchGroup 读不到成员, 删组会连带删色板 ⇒ 一律不删)
+      if (sg && sg.supported) {
+        rows.push("<div>颜色组 <b class='white'>" + (sg.total || 0) +
+          "</b> 个 <span class='dim'>(本版不删除颜色组，以避免误删组内色板)</span></div>");
+      }
+      sHtml = rows.join("");
+      if (sUnusedTotal > 0) {
+        sHtml += '<div class="action-row">' +
+          '<button class="btn-action" id="btnClearSwatches"' +
+          ' title="删除未被任何对象引用的色板、渐变、图案(不删除颜色组)">' +
+          '删除未使用的色板</button>' +
+          '</div>';
+      }
+      sHtml += '<div class="dim">判定含隐藏与锁定对象、组与复合路径、文字字符色与整帧色；未使用 = 没有任何对象引用它。颜色组不会被删除(避免误删组内色板)。</div>';
+    } else {
+      // v10.46(审查 P2-3): 无数据态徽标同步改"未检查" —— 旧实现只改 sHtml,
+      //   徽标仍是初始值"无未使用"(绿色), 与正文"未检查。"自相矛盾。
+      sHtml = '<span class="dim">未检查。</span>';
+      sChip = "未检查";
+      sLevel = "warn";
+    }
+    cards[7] = scanCk[7]
+      ? card("色板", sLevel, sChip, sHtml)
+      : offCard("色板");
+
     // v10.1: 按 CARD_ORDER 拼接 —— 卡片上下顺序可在「设置」里拖动调整。
-    //   ⚠ 只影响渲染顺序; 传给 jsx 的七卡开关仍按固定卡序(ckArgs()), 否则 c1..c7 会错位。
+    //   ⚠ 只影响渲染顺序; 传给 jsx 的卡开关仍按固定卡序(ckArgs()+swArg()), 否则 c1..c9 会错位。
     var html = "", _oi;
     for (_oi = 0; _oi < CARD_ORDER.length; _oi++) html += (cards[CARD_ORDER[_oi]] || "");
     $("results").innerHTML = html;
+    // v10.42: 新内容已就位 ⇒ 撤掉占位高度(此后高度由真实内容决定; 滚动位置全程未被夹动)
+    releaseHeight($("results"));
+    releaseHeight($("foot"));
 
     // 复选框状态回填 + 变更保存(面板重绘后保持用户选择)
     // v5.6: 变更同步写入 localStorage,跨面板重开也保持
@@ -1140,8 +1455,29 @@
     if (co) {
       co.checked = CHK_OVP_UNLOCK;
       co.onchange = function () {
-        CHK_OVP_UNLOCK = co.checked;
-        try { localStorage.setItem("pf_chkOvpUnlock", co.checked ? "1" : "0"); } catch (e) {}
+        syncOvpUnlock(co.checked);
+      };
+    }
+    // v10.14: 分级版规则勾选回填 + 持久化(与 chkOvpUnlock 同一套写法; id 加 t 前缀防两版冲突)
+    var tcw = $("tChkClearWhite"), tak = $("tChkAddK100"), tou = $("tChkOvpUnlock");
+    if (tcw) {
+      tcw.checked = CHK_CLEAR_WHITE;
+      tcw.onchange = function () {
+        CHK_CLEAR_WHITE = tcw.checked;
+        try { localStorage.setItem("pf_chkClearWhite", tcw.checked ? "1" : "0"); } catch (e) {}
+      };
+    }
+    if (tak) {
+      tak.checked = CHK_ADD_K100;
+      tak.onchange = function () {
+        CHK_ADD_K100 = tak.checked;
+        try { localStorage.setItem("pf_chkAddK100", tak.checked ? "1" : "0"); } catch (e) {}
+      };
+    }
+    if (tou) {
+      tou.checked = CHK_OVP_UNLOCK;
+      tou.onchange = function () {
+        syncOvpUnlock(tou.checked);
       };
     }
   }
@@ -1160,22 +1496,100 @@
     //   复用 run() 的超时口径: 20 秒补一句"仍在继续";操作本身不中断
     //   (ExtendScript 无多线程,停不下来),回调到达时清掉计时器。
     var actTimer = setTimeout(function () {
-      showNotice("操作耗时较长，后台仍在继续，完成后会自动刷新结果。");
+      // v10.43(审查 P2-a): 超时后放开动作锁 + 恢复各卡按钮 —— 大 PDF 操作可能数分钟,
+      //   期间 actionBusy 锁死、.btn-action 全禁用, 用户只能干等。放开不等于重发: 已发出的
+      //   jsx 照跑, 回调到达时再收尾; 期间新点的动作排进 ExtendScript 队列依次执行。
+      //   btnRun 一并恢复(只读动作, 与 v8.6 扫描超时口径一致; 真有扫描在跑时
+      //   scanBusy 会挡下重复点击)。loading 不动 —— 操作/扫描谁在跑都该转着。
+      actionBusy = false;
+      $("btnRun").disabled = false;
+      var btns2 = document.querySelectorAll(".btn-action");
+      for (var bj = 0; bj < btns2.length; bj++) btns2[bj].disabled = false;
+      showNotice("操作耗时较长，后台仍在继续。期间可进行其他操作，完成后会自动刷新结果。");
     }, BUSY_TIMEOUT_MS);
     execJsx(jsxFns, function (data, raw) {
       clearTimeout(actTimer);
       actionBusy = false;
       var actFailed = !(data && data.ok);   // v8.8: 失败路径要保留错误提示(见下方 run 调用)
-      if (!actFailed) {
-        // v7.1: 不再"成功词 + 详情"两句并排(原为"转曲完成。 已转曲 5 个文本框。")——
-        // 有 jsx 详情就只用详情,没有才退回成功词
-        showNotice(data.message || successMsg || "操作完成");
-      } else {
-        showError((data && data.error) ? data.error
-          : ("操作失败。返回: " + String(raw).substring(0, 120)));
-      }
+      // v10.43(审查 P1-a): 按钮/loading 的恢复**不再依赖 run() 收尾** —— run() 开头有
+      //   scanBusy / !inCEP 两道提前 return, 一旦被挡(操作回调与手动扫描/自动重扫撞上,
+      //   或非 CEP 环境), btnRun 会永久禁用、loading 常驻。就地恢复, 状态自愈。
+      $("btnRun").disabled = false;
+      if (!scanBusy) $("loading").classList.add("hidden");   // 扫描并发中还转着
+      // v10.43(P1-a): 结论先存变量、不急着显示 —— run() 被 scanBusy 挡下时它开头那句
+      //   "正在检查中"会覆盖提示, 操作成败就石沉大海; 挪到 run() 之后按需补放。
+      var actMsg = actFailed
+        ? ((data && data.error) ? data.error
+           : ("操作失败。返回: " + String(raw).substring(0, 120)))
+        : (data.message || successMsg || "操作完成");
       run(true, actFailed); // v8.8: 失败时传 keepError，避免刚弹的红条被本轮 run() 抹掉；v8.0: 刷新检查结果(保留本次操作的成功提示;内部会恢复按钮、隐藏 loading)
+      // v10.43(P1-a): run() 若被 scanBusy 挡下(没发起刷新), 把本次结论补放出来
+      if (scanBusy && actMsg) {
+        if (actFailed) showError(actMsg); else showNotice(actMsg);
+      }
     });
+  }
+
+  // ---------- v10.13: 串行执行多个 JSX 动作(zhiban v10.13 移植) ----------
+  //   逐个执行, 任一失败**即停**并报错(fail-fast); 全部完成后统一刷新一次。
+  //   ⚠ 与 execAction 共用 actionBusy 锁, 防连点。
+  //   ⚠ 对 zhiban 原版的两处修正:
+  //     ① 原版失败分支是「先 step() 后 idx=calls.length」—— step 同步执行时会
+  //        把下一步也发出去, 与"任一失败即停"的注释矛盾; 先封口再收尾才是真 fail-fast。
+  //     v10.41: 原②「随动作一并禁用/恢复顶栏那枚按钮」随「全部清理」按钮一并移除。
+  function execActionMulti(calls, successMsg) {
+    if (actionBusy) return;
+    if (!calls || !calls.length) return;
+    actionBusy = true;
+    $("btnRun").disabled = true;
+    $("loading").classList.remove("hidden");
+    var btns = document.querySelectorAll(".btn-action");
+    for (var bi = 0; bi < btns.length; bi++) btns[bi].disabled = true;
+    var actTimer = setTimeout(function () {
+      // v10.43(审查 P2-a): 超时后放开动作锁 + 恢复各卡按钮 —— 大 PDF 操作可能数分钟,
+      //   期间 actionBusy 锁死、.btn-action 全禁用, 用户只能干等。放开不等于重发: 已发出的
+      //   jsx 照跑, 回调到达时再收尾; 期间新点的动作排进 ExtendScript 队列依次执行。
+      //   btnRun 一并恢复(只读动作, 与 v8.6 扫描超时口径一致; 真有扫描在跑时
+      //   scanBusy 会挡下重复点击)。loading 不动 —— 操作/扫描谁在跑都该转着。
+      actionBusy = false;
+      $("btnRun").disabled = false;
+      var btns2 = document.querySelectorAll(".btn-action");
+      for (var bj = 0; bj < btns2.length; bj++) btns2[bj].disabled = false;
+      showNotice("操作耗时较长，后台仍在继续。期间可进行其他操作，完成后会自动刷新结果。");
+    }, BUSY_TIMEOUT_MS);
+    var msgs = [], idx = 0, failed = null, raw0 = "";
+    function step() {
+      if (idx >= calls.length) {
+        clearTimeout(actTimer);
+        actionBusy = false;
+        // v10.43(审查 P1-a): 同 execAction —— 就地恢复按钮/loading, 不依赖 run() 收尾
+        $("btnRun").disabled = false;
+        if (!scanBusy) $("loading").classList.add("hidden");   // 扫描并发中还转着
+        // v10.43(P1-a): 结论存变量, run() 之后按 scanBusy 补放(理由同 execAction)
+        var multiFailed = !!failed;
+        var multiMsg = multiFailed
+          ? ((failed.data && failed.data.error) ? failed.data.error
+             : ("操作失败。返回: " + String(raw0).substring(0, 120)))
+          : (msgs.join(" ") || successMsg || "操作完成");
+        run(true, multiFailed);
+        if (scanBusy && multiMsg) {
+          if (multiFailed) showError(multiMsg); else showNotice(multiMsg);
+        }
+        return;
+      }
+      var call = calls[idx++];
+      execJsx(call, function (data, raw) {
+        if (data && data.ok) {
+          if (data.message) msgs.push(data.message);
+          step();
+        } else {
+          failed = { data: data }; raw0 = raw;
+          idx = calls.length;   // v10.13 修正: 先封口再收尾(原版顺序会多跑一步)
+          step();
+        }
+      });
+    }
+    step();
   }
 
   // 转曲前的图层处理选项(默认勾选;面板重绘后状态保留)
@@ -1183,10 +1597,44 @@
   var CHK_SHOW = true, CHK_UNLOCK = true;
   // v9.5: 叠印卡「解锁全部」—— 默认**不勾**(维持 v9.4 的"不动图层状态"默认), 状态同样持久化
   var CHK_OVP_UNLOCK = false;
+  // v10.28: 两版「解锁全部」统一写入口 —— 简洁版/分级版任一勾选即同步, 修复两版勾选不同步
+  function syncOvpUnlock(v) {
+    CHK_OVP_UNLOCK = v;
+    try { localStorage.setItem("pf_chkOvpUnlock", v ? "1" : "0"); } catch (e) {}
+  }
+  // v10.32: 叠印版本(pf_ovpMode)读写统一收口(审查 #12/#13) —— 原散落 5 读 1 写,
+  //   键名拼错/口径不一都无从查; 现在全工程只经这两个函数(键名只此一处字面量)。
+  // v10.33: PF_OVP_MODE_KEY 已上提到 IIFE 顶部常量区(审查 v10.32 第 11 条), 此处不再声明。
+  function readOvpMode() {
+    try { if (localStorage.getItem(PF_OVP_MODE_KEY) === "tiered") return "tiered"; } catch (eRm) {}
+    return "legacy";
+  }
+  function writeOvpMode(m) {
+    var mm = (m === "tiered") ? "tiered" : "legacy";
+    try { localStorage.setItem(PF_OVP_MODE_KEY, mm); } catch (eWm) {}
+    return mm;
+  }
+  // v10.37: 设置弹层草稿快照 —— 进场时记下开关/顺序/叠印模式的"当时值",
+  //   点「关闭」/Esc/点遮罩时整体回滚; 点「确认」才落盘。null = 弹层未打开。
+  //   ⚠ 这是"关闭 = 真正取消"的实现基础(雪糕反馈: 原先点关闭, 上面的改动照样生效)。
+  var SET_SNAP = null;
+  // v10.43(审查 P1-b): 叠印版本的**弹层草稿** —— 原先 setOvpMode 直接覆写 SET_SNAP.ovp,
+  //   进场快照被改成"改动后的值", 「关闭」回滚时 applyOvpModeUI(SET_SNAP.ovp) 复位到的
+  //   是改动值而非原值 ⇒ 关闭=不关闭。现在快照只读, 切换只写这里; null = 本次未改过。
+  var SET_OVP = null;
+  // 叠印模式取"当前该显示的值": 弹层开着读草稿, 否则读已存值。
+  function ovpModeNow() {
+    if (SET_SNAP) return (SET_OVP !== null ? SET_OVP : SET_SNAP.ovp);
+    return readOvpMode();
+  }
+  // v10.14: 分级版规则勾选(清除需处理叠印默认勾 / 单黑加叠印默认不勾 —— zhiban 同款)
+  var CHK_CLEAR_WHITE = true, CHK_ADD_K100 = false;
   try {
     if (localStorage.getItem("pf_chkShow") !== null) CHK_SHOW = localStorage.getItem("pf_chkShow") === "1";
     if (localStorage.getItem("pf_chkUnlock") !== null) CHK_UNLOCK = localStorage.getItem("pf_chkUnlock") === "1";
     if (localStorage.getItem("pf_chkOvpUnlock") !== null) CHK_OVP_UNLOCK = localStorage.getItem("pf_chkOvpUnlock") === "1";
+    if (localStorage.getItem("pf_chkClearWhite") !== null) CHK_CLEAR_WHITE = localStorage.getItem("pf_chkClearWhite") === "1";
+    if (localStorage.getItem("pf_chkAddK100") !== null) CHK_ADD_K100 = localStorage.getItem("pf_chkAddK100") === "1";
   } catch (eLS) {}
 
   // v5.6/体验①: 上次结果的文档指纹;面板获得焦点时比对,切换了文档就自动重扫
@@ -1202,7 +1650,9 @@
     var mask = $("modalMask"), msgEl = $("modalMsg");
     var titleEl = $("modalTitle");
     var okBtn = $("modalOk"), cancelBtn = $("modalCancel");
-    if (!mask || !msgEl || !okBtn || !cancelBtn) { if (onOk) onOk(); return; }
+    // v10.43(审查 P2-b): 原先 DOM 缺失时 `if (onOk) onOk()` —— 直接执行破坏性操作!
+    //   确认框的意义就是"问一句", 问不了时必须**取消**并如实报错, 而不是替用户点确定。
+    if (!mask || !msgEl || !okBtn || !cancelBtn) { showError("确认框初始化失败，操作已取消。"); return; }
     if (titleEl) titleEl.textContent = title || "提示";
     msgEl.textContent = msg;
     mask.classList.remove("hidden");
@@ -1221,6 +1671,28 @@
     document.addEventListener("keydown", onKey, true);
   }
 
+  // v10.35(审查 #1): 动作执行前的文档指纹校验 —— 六个破坏性入口(转曲/嵌入/清叠印/
+  //   叠印规则/删隐藏/清未用色板)在确认框**开着**时, 用户完全可能在 Illustrator 里切到
+  //   另一份文档(切文档不关面板 DOM)。确认框一旦点"确定", jsx 侧一律改 app.activeDocument
+  //   ⇒ 改的是**切过去的那份**, 与用户看着确认框时脑中的文档不是同一份。
+  //   包一层 guard: 执行前同步探一次 pfDocKey, 与上次渲染记录的 lastDocKey 不一致就直接
+  //   取消并报错。代价 = 每次执行多一次跨桥(几十毫秒, 用户无感)。
+  //   ⚠ 首轮尚未渲染(lastDocKey 为 null, 例如面板刚开、还没扫过)时**放行** —— 此时探到的
+  //   key 反过来作为基准, 不能因为"没有基准"就把用户的操作挡掉。
+  //   ⚠ 误拦场景(审查 v10.35 补): 用户从 A 切到 B → focus 触发 run() 完成(lastDocKey 刷成 B)
+  //   → 用户又切回 A → focus 触发但 300ms 防抖未结束(尚未重扫) → 用户此刻点按钮 → 探到 A,
+  //   与 lastDocKey=B 不符 ⇒ 取消。概率低、代价小(再点一次即可), 方向是"宁可误拦, 不可误改"。
+  function docGuard(runAction) {
+    execJsx("pfDocKey();", function (d) {
+      if (!d || !d.ok || !d.key) { if (runAction) runAction(); return; }  // 探针失败: 不阻断业务
+      if (lastDocKey && d.key !== lastDocKey) {
+        showError("检测到文档已切换，为免误改，操作已取消。请重新点按并确认。");
+        return;
+      }
+      if (runAction) runAction();
+    });
+  }
+
   function onOutline() {
     var showAll = $("chkShowAll") ? $("chkShowAll").checked : CHK_SHOW;
     var unlockAll = $("chkUnlockAll") ? $("chkUnlockAll").checked : CHK_UNLOCK;
@@ -1230,20 +1702,38 @@
     else if (unlockAll) action = "将解锁全部图层与锁定对象(Ctrl+2/锁定组)，不改动显示状态，然后转曲其中可见的文字。";
     else action = "将只转曲本就可见且未锁定的文字，不改动图层与对象状态。";
     customConfirm(action + "\n此操作不可撤销，确定继续?", function () {
-      execAction("pfOutlineAll(" + showAll + ", " + unlockAll + ");", "转曲完成。");
+      // v10.35(审查 #1): 执行前校验文档指纹, 防"确认框开着时切文档 → 改错文档"
+      docGuard(function () {
+        execAction("pfOutlineAll(" + showAll + ", " + unlockAll + ");", "转曲完成。");
+      });
     }, "确认转曲");
   }
   // v8.1: 嵌入范围改为"点嵌入时按需统计" —— 旧版读本轮检查结果里的 linkedAll/linkedHidden,
   //   而那两个数是每轮检查都做一遍的全文档 placedItems 遍历,只为这个确认框服务(用户极少点)。
   //   现改为点按钮时现调 pfLinkScope();取数失败退回泛化文案,绝不阻断嵌入。
   var embedProbing = false; // 防连点:取数期间再点直接忽略
+  // v10.28: 取数 10s 超时兜底 —— JSX 若因宿主卡死无回调, embedProbing 永远 true 会让嵌入按钮永久失灵
+  var embedProbeTimer = null;
+  // v10.39(审查 B4): 探针序号 —— 旧回调可能姗姗来迟, 把**新一轮**的 embedProbing/兜底 timer 清掉。
+  //   setTimeout 回调里带的序号与当前 embedSeq 不符即视为过期, 直接丢弃(不碰任何状态)。
+  var embedSeq = 0;
   function onEmbed() {
     if (embedProbing) return;
     embedProbing = true;
-    execJsx("pfLinkScope();", function (data) {
+    var mySeq = ++embedSeq;
+    embedProbeTimer = setTimeout(function () {
       embedProbing = false;
-      var nAll = (data && data.ok && data.all) || 0;
-      var nHid = (data && data.ok && data.hidden) || 0;
+      embedProbeTimer = null;
+    }, 10000);
+    execJsx("pfLinkScope();", function (data) {
+      if (mySeq !== embedSeq) return;   // 过期回调: 已被新一轮取代, 丢弃
+      embedProbing = false;
+      if (embedProbeTimer) { clearTimeout(embedProbeTimer); embedProbeTimer = null; }
+      // v10.39(审查 B3): pfLinkScope 在"无文档"时回 ok:false —— 原实现把 ok 归并成 0, 于是弹出
+      //   "文档中没有链接图"(与实际状态不符)。先判 ok, 不成立直接如实报错返回, 不弹确认框。
+      if (!data || !data.ok) { showError((data && data.error) || "读取链接图信息失败。"); return; }
+      var nAll = data.all || 0;
+      var nHid = data.hidden || 0;
       // v8.0: ① 如实说明范围 —— 嵌入走文档级"全部链接图"(**含隐藏对象**),与检查卡的可见口径不同,
       //          旧文案只说"所有链接图片",用户看到的"链接图片 N 张"与实际嵌入数对不上;
       //       ② v9.9: 矢量链接已不再栅格化(改走原生 embed) ⇒ 旧"会按 300dpi 栅格化为位图"
@@ -1254,11 +1744,14 @@
       var scope = nAll > 0
         ? ("将嵌入文档中全部 " + nAll + " 张链接图" +
            (nHid > 0 ? "(其中 " + nHid + " 张为隐藏对象)" : "") + "。")
-        : "将嵌入文档中所有链接图。";
+        : "文档中没有链接图，执行不会有任何改动。";
       customConfirm(scope +
         "\nPSD / TIF / PDF / AI 均跟随你在 Illustrator 里上次「嵌入」的导入选项。" +
         "\n此操作不可撤销，确定继续?", function () {
-        execAction("pfEmbedAll();", "嵌入完成。");
+        // v10.35(审查 #1): 同上 —— 嵌入列表是按"点嵌入时的文档"取的, 确认期间切了文档必须拦。
+        docGuard(function () {
+          execAction("pfEmbedAll();", "嵌入完成。");
+        });
       }, "确认嵌入");
     });
   }
@@ -1267,17 +1760,112 @@
   // v9.5: 加「解锁全部」复选框 —— 勾选后先解锁再清(锁定对象也能清), 隐藏对象始终不碰。
   //   ⚠ 文案没说"不可撤销": 转曲/嵌入是真的不可逆,而这个只是翻属性,撤销粒度我没验证过,
   //     不写死。要统一成"不可撤销"随时说。
-  // v9.9: 文案统一 —— 全角（）→ 半角()、"(Ctrl+2 / 锁定组)"→"(Ctrl+2/锁定组)"(与转曲弹窗一致),
+  // v9.9: 文案统一 —— 全角()→ 半角()、"(Ctrl+2 / 锁定组)"→"(Ctrl+2/锁定组)"(与转曲弹窗一致),
   //   并补第三参标题"确认清除叠印"。
   function onOvpClear() {
-    var uAll = $("chkOvpUnlock") ? $("chkOvpUnlock").checked : CHK_OVP_UNLOCK;
+    var uAll = CHK_OVP_UNLOCK;
     customConfirm("将关闭文档中全部叠印(文字与图形、填充与描边)。" +
       (uAll ? "\n已勾选「解锁全部」：会先解锁全部图层与锁定对象(Ctrl+2/锁定组)，其叠印一并清除。"
             : "\n未勾选「解锁全部」：锁定或隐藏的对象会跳过，其状态一律不改动。") +
       "\n隐藏对象与图层不参与叠印检查，本操作也不会改动它们。" +
       "\n此操作会直接修改文档，确定继续?", function () {
-      execAction("pfClearOverprint(" + uAll + ");", "清除叠印完成。");
+      // v10.35(审查 #1): 同上
+      docGuard(function () {
+        execAction("pfClearOverprint(" + uAll + ");", "清除叠印完成。");
+      });
     }, "确认清除叠印");
+  }
+
+  // ---------- v10.14: 分级版叠印卡 —— seg 切换 + 规则动作执行 ----------
+  // 切换只改 #ovpDual 的 data-m 属性(CSS 控制两版显隐), 选择记 pf_ovpMode, 默认简洁版。
+  function setOvpMode(m) {
+    // v10.37: 弹层内切换只改草稿 + UI, 不落盘 —— 由「确认」统一写(见 SET_SNAP 注释)。
+    // v10.43(P1-b): 草稿写 SET_OVP(不再覆写 SET_SNAP.ovp 快照), 否则「关闭」回滚失效。
+    var mm = (m === "tiered") ? "tiered" : "legacy";
+    if (SET_SNAP) SET_OVP = mm;
+    else writeOvpMode(mm);      // 弹层外的调用(当前无)仍即时落盘
+    applyOvpModeUI(mm);         // v10.32: 选中态同步收口(审查 #12)
+  }
+  // v10.32: 把"按模式同步 DOM 选中态"从 setOvpMode 里抽出来(审查 #12) ——
+  //   drawRows 重绘 seg 后可复用它, 不必走 setOvpMode(避免重复写 localStorage)。
+  //   范围钉死在设置弹层列表内(审查 #8), 不做全文档扫描。
+  function applyOvpModeUI(mm) {
+    var w = $("ovpDual");
+    if (w) w.setAttribute("data-m", mm);
+    var list = $("setList");
+    var segs = list ? list.querySelectorAll(".ovp-seg i[data-m]") : [];
+    for (var si = 0; si < segs.length; si++) {
+      if (segs[si].getAttribute("data-m") === mm) segs[si].classList.add("on");
+      else segs[si].classList.remove("on");
+    }
+  }
+  // 执行勾选项: zhiban 同款 —— 第二个动作的 lockFirst = doW ? false : unlock(避免连跑两遍全文档解锁)。
+  // 走 v10.13 execActionMulti 串行器(任一步失败即停并如实报错)。
+  function onOvpApply() {
+    var doW = $("tChkClearWhite") ? $("tChkClearWhite").checked : CHK_CLEAR_WHITE;
+    var doK = $("tChkAddK100") ? $("tChkAddK100").checked : CHK_ADD_K100;
+    var uT = CHK_OVP_UNLOCK;
+    var calls = [];
+    if (doW) calls.push("pfClearWhiteOverprint(" + uT + ");");
+    if (doK) calls.push("pfAddK100Overprint(" + (doW ? false : uT) + ");");
+    if (!calls.length) { showNotice("请先勾选要执行的规则(清除需处理叠印 / 单黑加叠印)。"); return; }
+    customConfirm("将按勾选依次执行：\n" +
+      (doW ? "· 清除需处理叠印(纯白 + 彩色)\n" : "") +
+      (doK ? "· 为单黑(C0M0Y0K100)对象新增叠印\n" : "") +
+      (uT ? "执行前先解锁全部图层与锁定对象。\n" : "") +
+      "此操作会直接修改文档，确定继续?", function () {
+      // v10.35(审查 #1): 同上
+      docGuard(function () {
+        execActionMulti(calls, "叠印规则执行完成。");
+      });
+    }, "确认执行叠印规则");
+  }
+
+  // ---------- v10.15: 一键删除全部隐藏对象(zhiban 同源移植) ----------
+  //   只删对象, 隐藏图层(含子图层)本身保留; 范围=可见图层内的隐藏组/Ctrl+3 隐藏对象。
+  //   锁定的隐藏对象删不动, jsx 如实报数, 由用户解锁后重试 —— 不擅自改锁定状态。
+  function onDelHidden() {
+    customConfirm("将删除可见图层内的隐藏对象(隐藏组、Ctrl+3 隐藏的对象)。\n" +
+      "隐藏图层及其中的对象一律保留，不会被删除。\n" +
+      "此操作不可撤销，确定继续?", function () {
+      // v10.35(审查 #1): 同上 —— 删除是最不可逆的一步
+      docGuard(function () {
+        execAction("pfDeleteHidden();", "删除完成。");
+      });
+    }, "确认删除隐藏对象");
+  }
+
+  // ---------- v10.14: 叠印卡 seg 页签(原挂两版卡头; v10.29 起只挂设置弹层「叠印」行尾) ----------
+  //   ⚠ seg <i> 不加 id(拖动重绘会重复出现) —— 委托按 data-m + 父类名识别。
+  //   v10.29: 不再接收 active 参 —— 选中态直接读 pf_ovpMode(卡头双份时代每版自带 on, 现全局一份)。
+  function ovpSeg() {
+    // 样式仿参考 chips —— 胶囊容器+选中胶囊块(雪糕定稿 v10.17/v10.23 扁平化)
+    var m = ovpModeNow();   // v10.37: 弹层内读草稿(切了没确认也显示草稿选中态), 否则读已存值
+    return '<span class="ovp-seg" title="切换叠印卡的展示与操作方式(全清理=只报总数+一键清除; 分级版=四分类+规则动作)">' +
+      '<i data-m="legacy"' + (m === "legacy" ? ' class="on"' : '') + '>全清理</i>' +
+      '<i data-m="tiered"' + (m === "tiered" ? ' class="on"' : '') + '>分级版</i></span>';
+  }
+
+  // ---------- v10.13: 卡⑧ 删除未使用色板(zhiban v0.7.8 原文移植) ----------
+  //   范围: 未使用色板 + 未使用渐变 + 未使用图案; **颜色组一律不删**
+  //   (AI 28 的 SwatchGroup 读不到成员, 删组会级联删掉组内色板 —— zhiban 两次事故的结论)。
+  function onClearSwatches() {
+    customConfirm("将删除文档中没有任何对象在使用的资产：\n" +
+      "· 色板：保留系统四项(无 / 套版色 / 黑 / 白)与所有在用颜色；\n" +
+      "· 渐变：删除未被任何对象引用的渐变；\n" +
+      "· 图案：删除未被任何对象引用的图案。\n" +
+      "颜色组不会被删除(避免误删组内色板)。\n" +
+      "判定范围含隐藏与锁定对象、组与复合路径、文字字符色。\n" +
+      "此操作不可撤销，确定继续?", function () {
+      // v10.39(审查 B1): 补 docGuard —— 原先漏了这一处(v10.35 #1 的六入口名单没算上它)。
+      //   确认框开着时切文档 → 点确定 → pfClearUnusedSwatches() 改的是切过去那份, 与 #1 同类事故。
+      docGuard(function () {
+        execActionMulti([
+          "pfClearUnusedSwatches();",
+          "pfClearUnusedGradPattern();"
+        ], "清理完成。");
+      });
+    }, "确认删除未使用的色板");
   }
 
   // 事件委托: 处理动态生成的按钮
@@ -1286,21 +1874,43 @@
     if (t && t.id === "btnOutline") onOutline();
     else if (t && t.id === "btnEmbed") onEmbed();
     else if (t && t.id === "btnOvpClear") onOvpClear();
+    else if (t && t.id === "btnClearSwatches") onClearSwatches(); // v10.13: 卡⑧
+    else if (t && t.id === "tBtnOvpApply") onOvpApply(); // v10.14: 分级版规则执行
+    else if (t && t.id === "btnDelHidden") onDelHidden(); // v10.15: 卡② 删除隐藏对象
+    // v10.14: seg 页签 —— <i data-m> 在 .ovp-seg 里, 按 data-m 切两版显隐
+    // v10.33: 父节点判定由 `className === "ovp-seg"` 改为 classList.contains(审查 v10.32 第 7 条)
+    //   —— 严格相等一旦给 .ovp-seg 再加一个 class(如 .active)就会当场失效, 静默不响应点击。
+    else if (t && t.getAttribute && t.getAttribute("data-m") &&
+             t.parentNode && t.parentNode.classList &&
+             t.parentNode.classList.contains("ovp-seg")) {
+      // v10.34: 叠印滑块在 <label class="set-ck"> 之内(v10.31 雪糕点名"挂到叠印文案后面")。
+      //   HTML 规范: 点 label 内**任何**位置都会激活其关联 checkbox ⇒ 点滑块会连带切换
+      //   "叠印"行的勾选(雪糕截图)。label 的转发属**默认行为**, preventDefault 即可拦住,
+      //   不必把滑块搬出 label(那样要重排 CSS 间距)。
+      e.preventDefault();
+      setOvpMode(t.getAttribute("data-m"));
+    }
   });
 
   // ---------- 启动 ----------
   document.addEventListener("DOMContentLoaded", function () {
     // v8.0: 必须包一层 —— 若直接把 run 当监听器,浏览器会把 click 事件对象传进第 1 参(keepNotice),
     //       事件对象恒为真 ⇒ 手动点"开始检查"也会保留旧提示(不再是"清残留"语义)
-    initSettings(); // v10.0: 设置弹层(七卡开关)按真实卡序生成
+    initSettings(); // v10.0: 设置弹层(卡片开关, v10.13 起八卡)按真实卡序生成
     $("btnRun").addEventListener("click", function () { run(); });
     if (inCEP()) run(); // 打开面板自动检查一次
     // v5.6/体验①: 面板获得焦点时探测当前文档指纹,与上次结果不一致(切换了文档)则自动重扫
+    // v10.28: 300ms 防抖 —— 连续触发(Alt+Tab 抖动/双屏切换)时只在静默后探测一次, 减少无谓 JSX 调用
+    var focusDebounce = null;
     window.addEventListener("focus", function () {
       if (actionBusy || $("btnRun").disabled) return;
-      execJsx("pfDocKey();", function (data) {
-        if (data && data.ok && data.key && lastDocKey && data.key !== lastDocKey) run();
-      });
+      if (focusDebounce) clearTimeout(focusDebounce);
+      focusDebounce = setTimeout(function () {
+        focusDebounce = null;
+        execJsx("pfDocKey();", function (data) {
+          if (data && data.ok && data.key && lastDocKey && data.key !== lastDocKey) run();
+        });
+      }, 300);
     });
   });
 })();
