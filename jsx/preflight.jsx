@@ -3,53 +3,15 @@
 // 运行于 Illustrator ExtendScript 环境,由 CEP 面板调用
 // 入口函数: runPreflight()  返回 JSON 字符串
 // ------------------------------------------------------------
-// v3.7: 扫描核心重构为"图层→组→对象"一次树遍历(见 runPreflight 内注释):
-//       隐藏图层/隐藏组的整棵子树直接跳过,可见性沿树向下传递,
-//       不再逐对象沿 parent 链向上爬,每类对象独立扫描配额。
-// v3.6: ① 油墨不再对复合路径组件重复统计 ② 矢量链接跳过分辨率检查
-//       ③ 隐藏统计每类独立配额
-// v3.5: ① 系统字体表缓存到全局 ② 移除文档出血解析死代码
-//       ③ 文本框纳入出血测量 ④ 无位图时跳过 XMP 解析
-//       ⑤ 出血测量 bounds 先行
-// v5.9: 删除 runPreflight 内未使用的文档级 placedItems 变量(死代码)
-// v5.10: 新增缺失字体诊断量(res.fontDiag)——系统字体表条目数/可用标志、
-//        文档字体(doc.textFonts)判缺数、文本框口径判缺数、混合字体帧数,
-//        用于真机定位"该报缺失却不报"的原因;不影响任何判定结果。
-// v5.11: 诊断追加文档级文本框口径(doc.textFrames 全集,含隐藏/锁定,前 300 帧)——
-//        与树遍历名单对比,判断缺失字体是否藏在树遍历扫不到的地方(符号内/插件外壳)。
-// v5.12: 字体表条目同步记录 family/style,诊断下发"命中明细"——文档里出现的
-//        每个字体名及其表内 family/style。用于甄别"缺失字体占位条目":
-//        AI 会把文档引用的缺失字体也放进 app.textFonts(仅名字可用,family/style
-//        常为空),导致 v5.8 起表跟随刷新后缺失字体被误判为"已安装"。
-// v5.13 修复: 缺失字体被占位条目"洗白"——真机确认 zihunxinyanghei 以占位条目
-//        (family=名字,无 style)存在于 app.textFonts,v5.8 起表跟随刷新后不再报。
-//        现在建表时给占位条目打 ph 标记(无 style 且 family 为空/等于名字),
-//        缺失判定改为"不在表里或仅为占位条目都算缺失";真激活字体(有
-//        family/style)不受影响,v5.8 的"激活后不再误报"行为保持。
-// v5.14: 前端修复——字体卡徽标"未转曲 N 个"与"缺字体 N"由三目二选一改为
-//        并列双徽标(转曲状态主徽标 + 缺失字体副徽标),jsx 仅构建号跟随。
-// v5.15 新增: ① 极小字号检测——字号 < 6pt(≈2.12mm)的文字印刷易糊/断笔,
-//        树遍历文本框分支顺带读 size,样本记文字内容+字号,并入字体卡底部;
-//        ② 缺失链接检测——链接图源文件 file.exists === false 时计入缺失,
-//        清单条目带 missing 标记,并入图片嵌入卡。
-// v5.16 精简: v5.10~v5.12 的诊断量(res.fontDiag/文档级扫描/命中明细/前端
-//        诊断行)随根因确诊整体移除;占位条目过滤与极小字号徽标保留。
-// v5.17: 前端精简——缺失字体括号说明与"检测方式"灰字、极小字号小标题与
-//        建议灰字按用户要求移除,jsx 仅构建号跟随。
-// v5.19 精简: ① 隐藏图层名单封顶 10→6 ② 分辨率样本封顶 15→8(前端字体名单
-//        15→8 同步);③ 前端链接图清单两行并一行(路径移到悬停)。
-// v5.21 新增: 隐藏文字统计——doc.textFrames 全集(含隐藏,封顶 500 帧)逐帧用
-//        pfBlockInfo 判可见性,隐藏帧单独计数(hiddenText),字体名并入涉及
-//        字体与缺失检测;可见文字口径不变。
-// v10.2: 极小字号只剩一档 —— <TINY_PT 即计入并**标红**(原先 <6pt 黄 / <5pt 红两级已合并)。
-//        样本仍只按 <TINY_PT 收。
-// v8.3 新增: 叠印(Overprint)检查 —— 卡6 加"叠印"分块(计数标红) + 右上角红徽标"有叠印"。
-//        ① 图形(PathItem/CompoundPathItem): 读 pageItem 级 fillOverprint / strokeOverprint;
-//        ② 文字(TextFrame): **真机实测(AI 28.0.0) pageItem 级这两个属性"不存在"**
-//           ⇒ 只能读字符级 textRange.characterAttributes.overprintFill / overprintStroke;
-//        ③ 每一次读取都包 try/catch,读不到/抛异常一律当 false —— 绝不抛、绝不误报;
-//        ④ 分块排在"色版1~4%"之后、"描边<0.1mm"之前,与卡片新名
-//           `油墨 · 叠印 · 描边粗细` 同序;叠印数**不并入主徽标计数**,只走 extraChip。
+// 逐版改动见 更新日志.txt; 此处只留**仍影响当前逻辑**的结论:
+//   · 扫描结构: "图层→组→对象"一次树遍历 —— 隐藏图层/隐藏组的整棵子树直接跳过,
+//     可见性沿树向下传递, 不逐对象沿 parent 链向上爬。每类对象独立扫描配额。
+//   · 缺失字体占位条目: AI 会把文档引用的缺失字体也放进 app.textFonts(只有名字可用,
+//     family/style 为空), 建表时必须给这类条目打 ph 标记, 否则缺失字体会被"洗白"、
+//     不报缺失(v5.13 真机确诊)。判定口径: 不在表里 **或** 仅为占位条目, 都算缺失。
+//   · 叠印: 文字**没有** pageItem 级 fillOverprint/strokeOverprint(AI 28.0.0 真机实测),
+//     只能读字符级 textRange.characterAttributes.overprintFill / overprintStroke。
+//     每次读取都包 try/catch, 读不到/抛异常一律当 false —— 绝不抛、绝不误报。
 // ============================================================
 
 // ExtendScript 无原生 JSON,且读取未声明的 JSON 标识符会直接报错,
@@ -109,7 +71,8 @@ function pfStringify(value) {
 // v10.60(审查 2.2/2.4/2.6): 颜色收集深度上限 20->64 与主扫描统一; pfThCopy 补 htCap;
 //   __pfUsedCache 两处失效点(进 pfClearUnusedSwatches 即清 + pfClearUnusedGradPattern 读完即清)
 // v11.0: 版本号跃升至 11.0(从 10.60 起进入 11.x 线; 代码内容与 v10.60 一致, 仅版本标识变更)
-var PF_BUILD = "11.0";
+// v11.2: 全站胶囊按钮统一 40px 高(纯面板 CSS 改动, ExtendScript 逻辑零变化), 仅同步版本号
+var PF_BUILD = "11.33";
 
 // v10.46(审查 P2-1): 颜色收集的**轮内**复用缓存。
 //   onClearSwatches 用 execActionMulti 串联 pfClearUnusedSwatches + pfClearUnusedGradPattern,
@@ -179,17 +142,25 @@ function pfThDefaults() {
 //     却回默认 ⇒ 显示与判定不同源(雪糕 2026-10-07 真机踩中: 阈值改回默认后报出旧阈值结果)。
 // v10.32: 面板只传这 6 项(都是 <name>|<name>|… 的顺序线序),
 //   提成模块级常量 —— 原先每轮 check 都在函数内新建一次数组, 属可省的分配。
-var PF_TH_KEYS = ["bleed", "reso", "thin", "tiny", "inkOk", "inkWarn"];
+// v11.5: 末尾追加 "light"(色版极浅阈值) —— 原先它只能在 PF_TH_DEF 里改, 面板设置不到。
+//   位置必须与 main.js 的 TH_KEYS 一致(light 在末位), 否则当场错位。
+var PF_TH_KEYS = ["bleed", "reso", "thin", "tiny", "inkOk", "inkWarn", "light"];
 
 function pfThApply(s) {
   var t = pfThCopy(PF_TH_DEF);
   // v10.33: 去掉 `var keys = PF_TH_KEYS;` 别名(审查 v10.32 第 10 条) —— 常量不会改, 直接用更直白。
   var parts = String(s === undefined || s === null ? "" : s).split("|");
   var i, v;
+  // v11.5: 新线序带 "v2" 前缀(与 main.js thWire 同源) —— 加了字段后字段数不再能区分新旧
+  //   (新 7 项 / v10.1 旧 7 项都是 7)。无前缀的旧面板(6 项)按旧口径读不进, 逐项回落默认。
+  var off = (parts[0] === "v2") ? 1 : 0;
+  var n = parts.length - off;
   // v10.9: 字段校验收进 if —— 工作副本赋值无条件执行, 字段数不符时 t 即全默认。
-  if (parts.length === PF_TH_KEYS.length) {
+  // v11.5: 额外放行"无前缀 6 项"(旧面板线序) —— 万一 CEP 缓存里还是旧 main.js,
+  //   阈值照旧生效(light 回落默认), 而不是整列静默回默认。多余项读到 undefined ⇒ NaN ⇒ 跳过。
+  if (n === PF_TH_KEYS.length || (off === 0 && n === PF_TH_KEYS.length - 1)) {
     for (i = 0; i < PF_TH_KEYS.length; i++) {
-      v = parseFloat(parts[i]);
+      v = parseFloat(parts[i + off]);
       if (!isNaN(v) && isFinite(v) && v > 0) t[PF_TH_KEYS[i]] = v;
     }
     if (t.inkWarn <= t.inkOk) t.inkWarn = Math.max(t.inkOk + 1, PF_TH_DEF.inkWarn);
@@ -444,7 +415,11 @@ function pfUtf8Bytes(str) {
 function pfBase64(str) {
   var chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
   var bytes = pfUtf8Bytes(str);
-  var out = "";
+  // v11.1(审查 ⑬): out += ... 改成"按块 push + 末次 join"。
+  //   原写法每 3 字节做 4 次字符串拼接, 报告一大(几十 KB)就是几十万次拼接,
+  //   ExtendScript 的字符串是不可变的长串, 拼接要反复重新分配 ⇒ 编解码本身成了瓶颈。
+  //   现在每 3 字节只拼一个 4 字符块、push 一次, 最后 join 一次。输出逐字节不变。
+  var buf = [];
   var i = 0;
   while (i < bytes.length) {
     var b1 = bytes[i++];
@@ -452,12 +427,11 @@ function pfBase64(str) {
     var b3 = (i < bytes.length) ? bytes[i++] : -1;
     var has2 = (b2 !== -1), has3 = (b3 !== -1);
     var n = (b1 << 16) | ((has2 ? b2 : 0) << 8) | (has3 ? b3 : 0);
-    out += chars.charAt((n >> 18) & 63);
-    out += chars.charAt((n >> 12) & 63);
-    out += has2 ? chars.charAt((n >> 6) & 63) : "=";
-    out += has3 ? chars.charAt(n & 63) : "=";
+    buf.push(chars.charAt((n >> 18) & 63) + chars.charAt((n >> 12) & 63) +
+             (has2 ? chars.charAt((n >> 6) & 63) : "=") +
+             (has3 ? chars.charAt(n & 63) : "="));
   }
-  return out;
+  return buf.join("");
 }
 
 function pfReturn(res) {
@@ -515,7 +489,14 @@ function pfEnsureFontTable() {
         }
       } catch (efs) {}
     }
-  } catch (efc) {}
+  } catch (efc) {
+    // v11.21(外审 #14): 中途异常(被这里吞掉)会留下**半张表**, 而上面已经把
+    //   __pfSysFontCount 记成 n ⇒ 下次会以为表是完整的、永远不重建, 半表会让
+    //   表里没有的字体全被判成缺失。这里把计数置 -1, 下次强制重建。
+    __pfSysFontCount = -1;
+    __pfSysFonts = {};
+    __pfSysFontsReady = false;
+  }
   // 构建后校验: 表仍为空(逐条读取全失败/中途异常)则视为不可用,避免半表全量误报(v3.4)
   if (__pfSysFontsReady) {
     __pfSysFontsReady = false;
@@ -637,7 +618,7 @@ function pfDocKey() {
 //   卡⑤走 resoCheck 入口,卡⑥⑦在对象分派分支里门控,卡③④同理。判定阈值/样本口径/卡片文案一律不变。
 function pfCkOn(v) { return !(v === 0 || v === false || v === "0"); }
 
-function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9) {
+function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
   var res = { ok: false };
   try {
     // v10.0: 各卡门控开关(缺省全开 —— 旧调用点不传参时行为与 v9.9 逐字一致)
@@ -648,7 +629,9 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9) {
       //   ⚠ 缺省(旧 7 参/无参调用)按**关**处理 —— 与 zhiban 的缺省开不同: 印前承诺
       //   「旧调用点行为与旧版逐字一致」(v10.0), 缺省开会让老调用多跑一次全文档色板遍历;
       //   面板总是显式传 0/1, 不受影响。
-      sw: pfCkOn(c9 === undefined ? 0 : c9)
+      sw: pfCkOn(c9 === undefined ? 0 : c9),
+      // v11.15: 卡⑨「空文本」(第 10 参)。同色板口径 —— 缺省关, 面板显式传 0/1。
+      tx: pfCkOn(c10 === undefined ? 0 : c10)
     };
     // v10.1: 先应用面板传来的阈值, 并立刻回传生效值 —— 前端只显示这个数,
     //   自己不留任何阈值数字。缺省(旧调用点 runPreflight())时 c8 为 undefined,
@@ -746,7 +729,17 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9) {
       res.gradient = pfGradientScan(doc, usedOnce);
       res.pattern = pfPatternScan(doc, usedOnce);
       // 颜色组统计(读不到 swatchGroups 时 supported=false, 前端自动隐藏该行)
-      res.swatchGroup = pfSwatchGroupScan(doc, usedOnce);
+      //   v11.1(审查 ⑦): 不再传 usedOnce —— 该入参在函数内从未使用。
+      res.swatchGroup = pfSwatchGroupScan(doc);
+    }
+
+    // ---------- 2a2. 清理(游离点 / 未上色 / 空文本) ----------
+    // v11.15: 卡⑨ 起于"删空文本框"; v11.16(雪糕) 扩成一张「清理」卡 ——
+    //   对照 Illustrator 自带「对象 > 路径 > 清理」的三个勾选项。
+    //   只统计不修改; 真正删除走 pfCleanup(doStray, doUnpaint, doText)(卡片「一键清理」)。
+    //   ⚠ 扫描与删除共用 pfJunkEach 同一套判定, 避免"报 N 删 M"。
+    if (CK.tx) {
+      res.cleanup = pfCleanupScan(doc);
     }
 
     // ---------- 2b. 隐藏对象检查 ----------
@@ -991,7 +984,8 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9) {
     // v5.9: 文档级 placedItems 变量自 v5.7 起已无任何引用(死代码),删除,
     // 省掉每次检查一次跨桥调用;文档级集合只保留 rasterItems,
     // 仅用于 XMP 文件名解析(ris)的必要判断。
-    var ris = doc.rasterItems;
+    // v11.21(外审 #13): 卡⑤关着时不必读这一笔 —— ris 只服务 XMP 名称解析(已门控 CK.rs)
+    var ris = CK.rs ? doc.rasterItems : [];
     // v8.1: linkedAll/linkedHidden 移出本对象 —— 改由 pfLinkScope() 在点"嵌入"时按需统计,
     //   不再每轮检查都扫一遍文档级 placedItems(见文件末尾 pfLinkScope)
     var imgs = { linked: [], linkedCount: 0, embeddedCount: 0, missingCount: 0, truncated: false };
@@ -1480,7 +1474,10 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9) {
           try { fnH = tfH.textRange.characterAttributes.textFont.name; } catch (eFnH) { fnH = ""; }
           if (fnH && fnH !== "(混合字体)") {
             if (!seen[fnH]) { seen[fnH] = true; fonts.names.push(fnH); }
-            if (pfIsFontMissing(fnH)) hiddenText.missingCount++;
+            // v11.21(外审 #11): 补门控 —— 字体表整体不可用时 pfIsFontMissing 对任何名字
+            //   都会 return true(表里没有 ⇒ 判缺失), 隐藏文字这一路原先没门控, 会造成
+            //   「缺字体 N 个」但清单空白(主检测那段是门控跳过、不给结论)。现与主检测同口径。
+            if ((__pfProbeOn || __pfSysFontsReady) && pfIsFontMissing(fnH)) hiddenText.missingCount++;
           }
         }
         if (dtfsAll.length > capHT) hiddenText.truncated = true;
@@ -1726,7 +1723,18 @@ function pfSwatchUsed(sw, usedNames, usedColors) {
 function pfUsedColorKeys(doc) {
   var names = {};      // 专色名(SPOTNAME:) / 图案引用(PATT:) / 渐变引用(GRAD:)
   var colors = [];     // 印刷色对象列表(容差匹配用)
-  var colorSeen = 0;   // 防止颜色列表爆炸(大文档)
+  var colorSeen = 0;   // 已登记的**不同色值**数(去重后), 防列表爆炸(大文档)
+  // v11.1(审查 ④): 颜色去重键表 —— 原来 colorSeen 数的是"对象个数"且不去重:
+  //   一张图里 5000 个对象都用同一个 K100, 旧写法会在第 4001 个对象上就把
+  //   colorTruncated 置真 ⇒ 色板删除动作整体拒绝执行, 而实际上全文只用到 1 种颜色。
+  //   文案写的是"颜色超过 4000 种", 与行为(对象超过 4000 个)不符, 属于误报。
+  //   现在按**完全相同的色值**去重(键用原始分量拼, 不做四舍五入):
+  //     ⚠ 不能用量化键(pfColorKey 的 Math.round): 两个色值四舍五入后同键但实际
+  //       相差近 1.0, 而判定容差只有 0.5 —— 去重会误删"能匹配上色板"的那一个,
+  //       反而制造误删。用原始分量拼键, 只有真·同色才合并, 匹配语义零变化。
+  //   顺带收益: colors 从"对象数"降到"不同色数", pfSwatchUsed 的容差循环随之变短
+  //   (60 色板 × 4000 条 → 60 色板 × 几十条)。
+  var colorKeys = {};
   // v0.5.2: 成功遍历到的**顶层对象数**(不含子层下钻的重复计数)。
   //   用途: 区分"真·空文档/空画板"(objCount=0) 与"遍历出错"(有对象却一个色都收不到)。
   //   空画板时该值为 0 ⇒ 安全闸放行(本就该删掉所有非系统色板);
@@ -1734,6 +1742,7 @@ function pfUsedColorKeys(doc) {
   var objCount = 0;
   // v10.28: 颜色收集触顶标志(4000 上限) —— 触顶时删除动作拒绝执行,
   //   防止"没收集到的颜色对应色板被误判为未使用"而误删(审计疑似4)。
+  //   v11.1: 上限的计量单位由"对象数"改为"不同色值数"(见上 colorKeys)。
   var colorTruncated = false;
 
   // v0.5: 按名字登记一个渐变/图案引用(供"未使用渐变/图案"判定)
@@ -1768,7 +1777,22 @@ function pfUsedColorKeys(doc) {
       return;
     }
     if (t === "CMYKColor" || t === "RGBColor" || t === "GrayColor") {
-      if (colorSeen < 4000) { colors.push(c); colorSeen++; } else { colorTruncated = true; }
+      // v11.1(审查 ④): 先按原始分量拼键去重(键取不到时退回"逐对象登记", 宁多不少)
+      var ck = "";
+      try {
+        if (t === "CMYKColor") ck = "C" + c.cyan + "," + c.magenta + "," + c.yellow + "," + c.black;
+        else if (t === "RGBColor") ck = "R" + c.red + "," + c.green + "," + c.blue;
+        else ck = "G" + c.gray;
+      } catch (eCK) { ck = ""; }
+      if (ck !== "") {
+        if (colorKeys[ck]) return;                       // 完全同色: 已在列表里, 不重复登记
+        if (colorSeen >= 4000) { colorTruncated = true; return; }
+        colorKeys[ck] = 1;
+        colorSeen++;
+        colors.push(c);
+      } else {
+        if (colorSeen < 4000) { colors.push(c); colorSeen++; } else { colorTruncated = true; }
+      }
       return;
     }
     // NoColor / 其它: 不需要登记
@@ -1791,13 +1815,20 @@ function pfUsedColorKeys(doc) {
     //   而 scanPathInk 那边是"只排除明确 false"⇒ 会统计其油墨。两侧不一致时,
     //   理论上会出现"对象有油墨、但它用的色板被判未使用" ⇒ 色板被误删。
     //   统一成"只排除明确 false"(更保守: 宁可多留色板, 不可误删)。
-    try { if (it.filled !== false) mark(it.fillColor); } catch (e1) {}
-    try { if (it.stroked === true) mark(it.strokeColor); } catch (e2) {}
+    // v11.1(审查 ⑧): fillColor / strokeColor 各只读一次。
+    //   原来 mark() 与下面的图案兜底**各读一遍**, 同一对象要跨桥取两次属性 ——
+    //   在几百上千对象的文档里就是多出整整一倍的颜色属性读取, 而读到的必然是同一份。
+    //   现改为先取到局部变量, 两处共用; 读失败时局部为 null ⇒ 两侧都安全跳过。
+    var cFill = null, cStrk = null;
+    try { cFill = it.fillColor; } catch (eF0) { cFill = null; }
+    try { cStrk = it.strokeColor; } catch (eS0) { cStrk = null; }
+    try { if (it.filled !== false) mark(cFill); } catch (e1) {}
+    try { if (it.stroked === true) mark(cStrk); } catch (e2) {}
 
     // v0.5: 图案填充的"图案"句柄有时只能从 fillColor.pattern 读 —— 已在 mark() 内处理;
     //   另补一层 .pattern 直读(个别对象 filled 标志不可靠时兜底)
-    try { if (it.fillColor && it.fillColor.typename === "PatternColor") markPattRef(it.fillColor.pattern); } catch (eP1) {}
-    try { if (it.strokeColor && it.strokeColor.typename === "PatternColor") markPattRef(it.strokeColor.pattern); } catch (eP2) {}
+    try { if (cFill && cFill.typename === "PatternColor") markPattRef(cFill.pattern); } catch (eP1) {}
+    try { if (cStrk && cStrk.typename === "PatternColor") markPattRef(cStrk.pattern); } catch (eP2) {}
 
     // 下钻子对象
     try {
@@ -1870,18 +1901,20 @@ function pfUsedColorKeys(doc) {
 }
 
 // 统计未使用色板(只读, 不修改文档)
-//   返回 { total, used, unused, truncated }
+//   返回 { total, used, unused }
 //   v10.46(审查 P2-2): 删死字段 —— unusedNames/usedNames/noText/colorCount/nameCount
-//     前端卡⑧只读 total/used/unused/truncated(五个都没接线); names 收集连带
+//     前端卡⑧只读 total/used/unused(五个都没接线); names 收集连带
 //     NAME_CAP 逻辑一并简化, truncated 改按"未使用总数 > NAME_CAP"判(等价原语义)。
+//   v11.1(审查 ⑦): 再把 truncated 一并删掉 —— main.js 对 swatches/gradients/patterns
+//     这三个结果**只读 total/used/unused**(grep 零消费), 那个字段算出来就没人看;
+//     连带 NAME_CAP=12 这个魔数在三个扫描里各重复一遍也一起收掉。
 function pfSwatchScan(doc, usedPre) {
-  var out = { total: 0, used: 0, unused: 0, truncated: false };
+  var out = { total: 0, used: 0, unused: 0 };
   try {
     // v10.28: 加参 usedPre 复用调用方已收集的 pfUsedColorKeys 结果, 消除同一轮内双调(审计疑似2)
     var used = usedPre || pfUsedColorKeys(doc);
     var sws = doc.swatches;
     out.total = sws.length;
-    var NAME_CAP = 12;   // 未使用清单的截断判据(前端只列前 N 个的旧口径, 现仅用于 truncated)
     for (var i = 0; i < sws.length; i++) {
       var sw = sws[i], nm = "", isUsed = false;
       try { nm = sw.name; } catch (eN) { continue; }
@@ -1891,7 +1924,6 @@ function pfSwatchScan(doc, usedPre) {
       if (isUsed) out.used++;
       else out.unused++;
     }
-    if (out.unused > NAME_CAP) out.truncated = true;
   } catch (e) {}
   return out;
 }
@@ -1912,14 +1944,13 @@ function pfSwatchScan(doc, usedPre) {
 // ============================================================
 
 // 统计未使用渐变(只读)
-//   返回 { total, used, unused, truncated }  (v10.46 审查 P2-2: 清单字段已删)
+//   返回 { total, used, unused }  (v10.46 审查 P2-2: 清单字段已删; v11.1 审查 ⑦: truncated 亦删)
 function pfGradientScan(doc, used) {
-  var out = { total: 0, used: 0, unused: 0, truncated: false };
+  var out = { total: 0, used: 0, unused: 0 };
   try {
     if (!used) used = pfUsedColorKeys(doc);
     var gs = doc.gradients;
     out.total = gs.length;
-    var NAME_CAP = 12;   // v10.46(审查 P2-2): 仅作 truncated 判据(清单字段已删)
     for (var i = 0; i < gs.length; i++) {
       var nm = "", isUsed = false;
       try { nm = gs[i].name; } catch (eN) { continue; }
@@ -1927,19 +1958,18 @@ function pfGradientScan(doc, used) {
       if (isUsed) out.used++;
       else out.unused++;
     }
-    if (out.unused > NAME_CAP) out.truncated = true;
   } catch (e) {}
   return out;
 }
 
 // 统计未使用图案(只读)
+//   返回 { total, used, unused }  (v11.1 审查 ⑦: 同 pfGradientScan 删 truncated)
 function pfPatternScan(doc, used) {
-  var out = { total: 0, used: 0, unused: 0, truncated: false };
+  var out = { total: 0, used: 0, unused: 0 };
   try {
     if (!used) used = pfUsedColorKeys(doc);
     var pts = doc.patterns;
     out.total = pts.length;
-    var NAME_CAP = 12;
     for (var i = 0; i < pts.length; i++) {
       var nm = "", isUsed = false;
       try { nm = pts[i].name; } catch (eN) { continue; }
@@ -1947,7 +1977,6 @@ function pfPatternScan(doc, used) {
       if (isUsed) out.used++;
       else out.unused++;
     }
-    if (out.unused > NAME_CAP) out.truncated = true;
   } catch (e) {}
   return out;
 }
@@ -2064,8 +2093,10 @@ function pfGetSwatchGroups(doc) {
 //   supported=false 表示该版本 AI 不支持 swatchGroups(前端隐藏相关 UI)
 //   ⚠ v0.7.8: 真机诊断(AI 28.0.0) 证实 SwatchGroup **无法读取成员**(swatches 等全 undefined),
 //     故**不再统计"组内未使用色板"**(根本读不到), 只报告颜色组数量。
-function pfSwatchGroupScan(doc, used) {
-  var out = { supported: false, total: 0, unknown: 0, groups: [] };
+//   v11.1(审查 ⑦): 删死参 used 与死字段 unknown/groups —— 前端只读 supported/total
+//     (main.js 卡⑧ 仅取 sg.supported / sg.total), 那个入参在函数体里一次都没被用过。
+function pfSwatchGroupScan(doc) {
+  var out = { supported: false, total: 0 };
   var gs = pfGetSwatchGroups(doc);
   if (!gs) return out;   // 不支持 ⇒ 直接返回, 不影响其它统计
   out.supported = true;
@@ -2207,7 +2238,11 @@ function pfClearUnusedSwatches() {
 // 一键操作: 按需解锁/显示图层(含子图层)
 // unlockAll=true 时解锁; showAll=true 时显示; 可单独或同时
 // ============================================================
-function pfUnlockLayer(layer, unlockAll, showAll) {
+function pfUnlockLayer(layer, unlockAll, showAll, depth) {
+  // v11.1(审查 ⑭): 补深度上限 64 —— 全站其余六处图层/对象递归(walkLayers / visitItem /
+  //   collectItem / collectTop …)都是 64, 只有本函数与 snapHiddenLayers 没有闸。
+  //   正常文档图层深度个位数, 64 只为兜住"异常 parent/layers 环"导致的栈溢出。
+  if (depth > 64) return;
   // v10.8: 未勾「显示」时, 隐藏图层整棵跳过 —— 隐藏内容不参与检查(卡内已明示),
   //   也不该被「解锁全部」改掉锁定状态(清除叠印/转曲共用本函数);
   //   勾了「显示」则照常(先显示后解锁, 隐藏层一并处理)。读取失败保守放行(维持旧行为)。
@@ -2216,8 +2251,24 @@ function pfUnlockLayer(layer, unlockAll, showAll) {
   if (showAll) { try { layer.visible = true; } catch (e) {} }
   try {
     var sub = layer.layers;
-    for (var i = 0; i < sub.length; i++) pfUnlockLayer(sub[i], unlockAll, showAll);
+    for (var i = 0; i < sub.length; i++) pfUnlockLayer(sub[i], unlockAll, showAll, (depth || 0) + 1);
   } catch (e) {}
+}
+
+// 沿 parent 链解除**该对象自身**的锁定阻挡(含 Ctrl+2 与锁定组); 隐藏一律不动。
+//   返回解除层数; 循环上限 10 防异常 parent 链死循环。
+//   v11.1(审查 ⑤): 提到模块级 —— 原来 pfClearOverprint 的 pfUnlockItem 与
+//   pfOverprintRule 的 pfUnlockItem2 是**逐字相同**的两份(只差函数名), 两处各改一次
+//   才算改全, v10.43 就有过一次"只改一个、漏掉另一个"的记录。合成一份后只有一处可改。
+function pfUnlockItem(item) {
+  var n = 0, g = 0, info = null;
+  try { info = pfBlockInfo(item); } catch (e0) { return 0; }
+  while (info && info.reason === "locked" && g++ < 10) {
+    if (!pfClearBlock(info.node, "locked")) break;
+    n++;
+    try { info = pfBlockInfo(item); } catch (e1) { break; }
+  }
+  return n;
 }
 
 // ============================================================
@@ -2301,17 +2352,7 @@ function pfClearOverprint(unlockAll) {
       } catch (eUL) {}
     }
     // v9.5: 沿 parent 链解除该对象的**锁定**阻挡(含 Ctrl+2 与锁定组);隐藏一律不动。
-    //   返回解除层数;循环上限 10 与 pfOutlineAll 同款(防异常 parent 链死循环)。
-    function pfUnlockItem(item) {
-      var n = 0, g = 0, info = null;
-      try { info = pfBlockInfo(item); } catch (e0) { return 0; }
-      while (info && info.reason === "locked" && g++ < 10) {
-        if (!pfClearBlock(info.node, "locked")) break;
-        n++;
-        try { info = pfBlockInfo(item); } catch (e1) { break; }
-      }
-      return n;
-    }
+    //   v11.1(审查 ⑤): 函数体已提到模块级 pfUnlockItem(pfOverprintRule 共用同一份)。
 
     // 1) 文字: 帧级读法(与检查端同一个 characterAttributes,粒度一致)
     //   v10.46(审查 P1-1): 循环体抽成 pfClrOvpFrame —— 符号定义源内的文字帧复用同一套
@@ -2436,12 +2477,14 @@ function pfOutlineAll(showAll, unlockAll) {
     //   对象级(Ctrl+3)隐藏文字另在下面收集, 同样还原。只还原**可见性**, 不还原锁定
     //   —— 「解锁全部」是显式选择, 保持解锁(pfUnlockLayer 的 locked=false 不回滚)。
     var hiddenLayers = [];
-    function snapHiddenLayers(ls) {
+    // v11.1(审查 ⑭): 同 pfUnlockLayer, 补深度上限 64 兜底异常 layers 环
+    function snapHiddenLayers(ls, d) {
+      if (d > 64) return;
       for (var sl = 0; sl < ls.length; sl++) {
         var L = ls[sl], visL = true;
         try { visL = (L.visible !== false); } catch (eVL) {}
         if (!visL) hiddenLayers.push(L);
-        try { snapHiddenLayers(L.layers); } catch (eSL) {}
+        try { snapHiddenLayers(L.layers, (d || 0) + 1); } catch (eSL) {}
       }
     }
     if (sAll) { try { snapHiddenLayers(doc.layers); } catch (eSHL) {} }
@@ -2669,21 +2712,12 @@ function pfOverprintRule(mode, lockFirst) {
       } catch (eUL) {}
     }
     // 沿 parent 链解除该对象的**锁定**阻挡(解锁前置模式下);隐藏一律不动
-    function pfUnlockItem2(item) {
-      var n = 0, g = 0, info = null;
-      try { info = pfBlockInfo(item); } catch (e0) { return 0; }
-      while (info && info.reason === "locked" && g++ < 10) {
-        if (!pfClearBlock(info.node, "locked")) break;
-        n++;
-        try { info = pfBlockInfo(item); } catch (e1) { break; }
-      }
-      return n;
-    }
+    //   v11.1(审查 ⑤): 原先这里有第二份逐字相同的实现(pfUnlockItem2), 现共用模块级 pfUnlockItem。
 
     // 2. 文字(字符级, 与检查端同一粒度)
     //   v10.46(审查 P1-1): 循环体抽成 pfRuleFrame —— 符号定义源内的文字帧复用同一套
     function pfRuleFrame(tf) {
-      if (lf) unlocked += pfUnlockItem2(tf);
+      if (lf) unlocked += pfUnlockItem(tf);
       if (pfBlockInfo(tf)) { skipped++; return; }   // 锁定/隐藏: 跳过
       try {
         var ca = tf.textRange.characterAttributes;
@@ -2717,7 +2751,7 @@ function pfOverprintRule(mode, lockFirst) {
 
     // 3. 图形(pageItem 级: PathItem 与 CompoundPathItem 各一遍)
     function pfRulePath(pi) {
-      if (lf) unlocked += pfUnlockItem2(pi);
+      if (lf) unlocked += pfUnlockItem(pi);
       if (pfBlockInfo(pi)) { skipped++; return; }
       var fOn = false, sOn = false;
       try { fOn = (pi.filled === true); } catch (eFo) {}
@@ -2784,7 +2818,7 @@ function pfOverprintRule(mode, lockFirst) {
       var sisR = doc.symbolItems;
       for (var siR = 0; siR < sisR.length; siR++) {
         var sItR = sisR[siR];
-        if (lf) unlocked += pfUnlockItem2(sItR);
+        if (lf) unlocked += pfUnlockItem(sItR);
         if (pfBlockInfo(sItR)) { skipped++; continue; }
         var sDefR = null; try { sDefR = sItR.symbol; } catch (eSdR) {}
         var sSrcR = null;
@@ -2830,6 +2864,281 @@ function pfAddK100Overprint(lockFirst) { return pfOverprintRule("k100", lockFirs
 //   ② 锁定的隐藏对象 remove() 会抛异常 ⇒ 计入 failed 如实回报, 不擅自改锁定状态
 //   (与清叠印"不顺手改用户状态"同一哲学)。
 // ============================================================
+// v11.16(雪糕): 卡⑨ 由「空文本」扩成「清理」—— 对照 Illustrator 自带
+//   「对象 > 路径 > 清理」的三个勾选项: 游离点 / 未上色对象 / 空文本路径。
+//   口径(扫描 pfCleanupScan 与删除 pfCleanup 共用同一套 pfJunkEach, 避免"报 N 删 M"):
+//     ① 游离点  = 只有一个锚点的 PathItem(pathPoints.length === 1)。guides 一律不算、不碰。
+//     ② 未上色  = filled 与 stroked 都为 false 的 PathItem / CompoundPathItem。
+//        只认这两类叶子图形 —— 组、图层、文本帧不参与(文本帧归"空文本"那一项)。
+//        已判为游离点的不再重复计入未上色。
+//     ③ 空文本  = contents 去掉所有空白(空格/不间断空格/全角空格/零宽/制表/换行)后长度 0。
+//     ④ 范围 = 全文档树递归(layer.pageItems → 组内下钻), 含组内对象;
+//        **不含**符号定义源内的对象 —— 扫描与删除两侧一致, 不会有对不上的账。
+//        v11.33: 原为"文档级集合(pathItems / compoundPathItems / textFrames)",
+//        真机实测集合按下标取值是线性变慢的(3374 条要 476ms), 换成树递归后 7.9ms。
+//     ⑤ 判定照常计入隐藏与锁定对象, 但**隐藏或锁定的一律不删**(不解锁、不改可见性)。
+//   已知边界: 复合路径的**子路径**不做游离点判定(只判复合路径整体是否未上色)。
+//            v11.33 已量清两者关系: doc.pathItems 含复合路径的组件, 且实测占
+//            2819/3374 —— 树递归不进入组件, 与原"逐个读属性后 continue 丢弃"等价。
+// ============================================================
+function pfIsBlankText(s) {
+  if (s === null || s === undefined) return true;
+  var t = "";
+  try { t = String(s); } catch (e) { return false; }
+  return t.replace(/[\s\u00A0\u3000\u200B\uFEFF]/g, "").length === 0;
+}
+
+// 遍历三类"可清理对象", 逐个回调 cb(kind, item)
+//   kind ∈ "stray" | "unpainted" | "emptyText"
+function pfJunkEach(doc, cb) {
+  var i, n;
+  // ============================================================
+  // v11.33(真机实测): 枚举从"文档级集合逐个索引"改成"一次树递归"。
+  //   为什么改: doc.pathItems 按下标取值随下标线性变慢 —— 3374 条路径全量索引
+  //   要 476ms, 而同一棵树走递归只要 7.9ms, 同机同稿差 47.5 倍。
+  //   口径逐条核对过, 三类对象的判定结果与旧实现完全一致:
+  //     · 含组内对象; 含隐藏图层 / 隐藏组内对象 —— 本函数**不判** visible/hidden
+  //     · **不含**复合路径的组件: 旧实现对每个组件读 3 个属性后 continue 丢弃,
+  //       实测这类占 2819/3374, 正是那 476ms 的大头; 现在根本不进去
+  //     · **不含**符号定义源内对象 —— 不下钻 SymbolItem, 与旧 doc.pathItems 口径一致
+  //   ⚠ 两处深度上限 64 与项目其余递归同款, 防损坏文档无限嵌套。
+  //   ⚠ 顺序仍是"路径 → 复合路径 → 文本", 与旧实现一致(pfCleanup 的倒序删除依赖它)。
+  // ============================================================
+  var paths = [], cps = [], texts = [];
+  function junkWalkItems(items, depth) {
+    if (depth > 64) return;
+    for (var k = 0; k < items.length; k++) {
+      var it = items[k], tn = "";
+      try { tn = it.typename; } catch (eT) { continue; }
+      if (tn === "PathItem") paths.push(it);
+      else if (tn === "CompoundPathItem") cps.push(it);
+      else if (tn === "TextFrame") texts.push(it);
+      else if (tn === "GroupItem") { try { junkWalkItems(it.pageItems, depth + 1); } catch (eG) {} }
+    }
+  }
+  function junkWalkLayers(lyrs, depth) {
+    if (depth > 64) return;
+    for (var j = 0; j < lyrs.length; j++) {
+      var ly = lyrs[j];
+      try { junkWalkItems(ly.pageItems, 0); } catch (eL) {}
+      try { var subs = ly.layers; if (subs && subs.length) junkWalkLayers(subs, depth + 1); } catch (eS) {}
+    }
+  }
+  try { junkWalkLayers(doc.layers, 0); } catch (eL0) {}
+
+  // v11.17(安全): 路径文字(Type on a Path)的**基底路径**本身就是"无填充 + 无描边"的
+  //   PathItem —— 按"未上色"口径会被判成垃圾, 可它一删, 上面的文字当场没。
+  //   这里先把它收进 keepPath, 判定时跳过(skipUnpaint)。
+  //   ⚠ 两条路一起收, 互为兜底(取不到 textPath 的版本靠 parent 判断):
+  //     ① textFrame.textPath(仅 kind === PATHTEXT 有效)
+  //     ② 父级是 TextFrame 的 PathItem
+  var keepPath = [];
+  // v11.19(审查): TextType 是引擎内建枚举, 正常都在; 但这里**不能裸用** ——
+  //   一旦它不可用, 整个 pfJunkEach 会抛, 清理整卡直接失败。
+  //   取不到时 PT = -1 ⇒ 后面的 `kk !== PT` 恒真 ⇒ 不收 keepPath,
+  //   由 skipUnpaint 里"父级是 TextFrame"那条兜底继续保护路径文字基底。
+  var PT19 = -1;
+  try { PT19 = TextType.PATHTEXT; } catch (ekP) { PT19 = -1; }
+  for (i = 0; i < texts.length; i++) {
+    var tfK = texts[i], kk = -1;
+    try { kk = tfK.kind; } catch (ek2) { kk = -1; }
+    if (kk !== PT19) continue;
+    var tp = null;
+    try { tp = tfK.textPath; } catch (ek3) { tp = null; }
+    if (tp) keepPath.push(tp);
+  }
+  function skipUnpaint(it) {
+    var k = 0;
+    for (k = 0; k < keepPath.length; k++) { if (keepPath[k] === it) return true; }
+    var par = null;
+    try { par = it.parent; } catch (ek4) { par = null; }
+    var parTn = "";
+    try { parTn = par ? par.typename : ""; } catch (ek5) { parTn = ""; }
+    return parTn === "TextFrame";
+  }
+  // v11.20(雪糕真机反馈: "我有些图片是在剪切蒙版里面, 你把我的剪切蒙版也清理了"):
+  //   剪切蒙版的**蒙版路径**本身就是一条"无填充 + 无描边"的路径 —— 按未上色口径必删,
+  //   一删蒙版就散了, 里面的图整个露出来。这里挡两道, 互为兜底:
+  //     ① 对象自己就是剪切路径: pathItem / compoundPathItem 的 clipping === true;
+  //     ② 对象在**剪切组**里: 沿 parent 链往上找, 只要某一层组的成员中有 clippping 对象,
+  //        整组都算蒙版内容 —— 里面的矢量图形一个都不能动(位图不在 pathItems 里, 本就不参与)。
+  //   ⚠ 只影响"清理"这一张卡; 其他卡的统计口径不变(它们只是读, 不删)。
+  function skipClip(it) {
+    var clip = false;
+    try { clip = (it.clipping === true); } catch (eC1) { clip = false; }
+    if (clip) return true;
+    var p = it, guard = 0;
+    while (p && guard++ < 40) {
+      var tn = "";
+      try { tn = p.typename; } catch (eC2) { break; }
+      if (tn === "Document" || tn === "Layer") break;
+      if (tn === "GroupItem") {
+        var gis = null;
+        try { gis = p.pageItems; } catch (eC3) { gis = null; }
+        if (gis) {
+          for (var k2 = 0; k2 < gis.length; k2++) {
+            var ck = false;
+            try { ck = (gis[k2].clipping === true); } catch (eC4) { ck = false; }
+            if (ck) return true;
+          }
+        }
+      }
+      try { p = p.parent; } catch (eC5) { break; }
+    }
+    return false;
+  }
+
+  // ---- 路径类: 游离点 + 未上色 ----
+  if (paths.length) {
+    n = paths.length;
+    for (i = 0; i < n; i++) {
+      var p = paths[i], tn = "", np = -1, gd = false, fl = true, st = true;
+      try { tn = p.typename; } catch (e2) { continue; }
+      if (tn !== "PathItem") continue;
+      // v11.21(外审 #9): 防御 —— doc.pathItems 若**包含复合路径的组件**, 那些组件的
+      //   filled/stroked 可能跟着整体走或为空, 单个删掉会破坏复合路径。组件一律交给
+      //   "复合路径整体"那一轮判定(下面第二个循环), 这里直接跳过。
+      //   ⚠ 若某版 AI 的 pathItems 本就不含组件, 这条判断永不成立, 无副作用。
+      //   v11.33: 枚举已换成树递归(不进入 CompoundPathItem), 组件根本不会出现在 paths
+      //   里 ⇒ 本判断恒不成立, 纯属防御, 保留不删(将来若改回集合枚举会立刻再用上)。
+      var parP = null;
+      try { parP = p.parent; } catch (eP9) { parP = null; }
+      var parPTn = "";
+      try { parPTn = parP ? parP.typename : ""; } catch (eP9b) { parPTn = ""; }
+      if (parPTn === "CompoundPathItem") continue;
+      try { gd = (p.guides === true); } catch (e3) {}
+      if (gd) continue;                       // 辅助线: 不算游离点、也不碰
+      try { np = p.pathPoints.length; } catch (e4) { np = -1; }
+      if (np === 1) {
+        if (!skipClip(p)) cb("stray", p);          // v11.20: 剪切组里的单点也不动
+        continue;
+      }
+      try { fl = (p.filled !== false); st = (p.stroked !== false); } catch (e5) {}
+      // v11.17: 路径文字基底跳过; v11.20: 剪切蒙版路径 / 蒙版内容跳过
+      if (!fl && !st && !skipUnpaint(p) && !skipClip(p)) cb("unpainted", p);
+    }
+  }
+  // ---- 复合路径: 只判"未上色"(整体) ----
+  if (cps.length) {
+    n = cps.length;
+    for (i = 0; i < n; i++) {
+      var c2 = cps[i], gd2 = false, fl2 = true, st2 = true;
+      try { gd2 = (c2.guides === true); } catch (e8) {}
+      if (gd2) continue;
+      try { fl2 = (c2.filled !== false); st2 = (c2.stroked !== false); } catch (e9) {}
+      // v11.17: 同上; v11.20: 复合路径也可能是剪切路径(或位于剪切组内)
+      if (!fl2 && !st2 && !skipUnpaint(c2) && !skipClip(c2)) cb("unpainted", c2);
+    }
+  }
+  // ---- 空文本 ----
+  if (texts.length) {
+    n = texts.length;
+    for (i = 0; i < n; i++) {
+      var t = texts[i], blank = false;
+      try { blank = pfIsBlankText(t.contents); } catch (eC) { continue; }
+      if (blank) cb("emptyText", t);
+    }
+  }
+}
+
+// 只读统计: 三类各多少个(其中隐藏/锁定各几个) + 空文本里"纯空格"的条数
+function pfCleanupScan(doc) {
+  var out = {
+    stray:     { count: 0, hidden: 0, locked: 0 },
+    unpainted: { count: 0, hidden: 0, locked: 0 },
+    emptyText: { count: 0, hidden: 0, locked: 0 },
+    spaceOnly: 0
+  };
+  pfJunkEach(doc, function (kind, it) {
+    var o = out[kind];
+    if (!o) return;
+    o.count++;
+    var bi = null;
+    try { bi = pfBlockInfo(it); } catch (e) {}
+    if (bi && bi.hidden) o.hidden++;
+    else if (bi && bi.locked) o.locked++;
+    // "纯空格"单列: 原本有字符但全是空白(对照组: 完全空的点文本长度 0)
+    if (kind === "emptyText") {
+      var len = 0;
+      try { len = String(it.contents || "").length; } catch (e2) {}
+      if (len > 0) out.spaceOnly++;
+    }
+  });
+  return out;
+}
+
+// 一键清理 —— 按前端三个勾选框传入的开关执行(1/0 或 true/false)
+function pfCleanup(doStray, doUnpaint, doText) {
+  var res = { ok: false };
+  try {
+    if (app.documents.length === 0) { res.error = "当前没有打开的文档，请先打开一个 AI 文件。"; return pfReturn(res); }
+    var doc = app.activeDocument;
+    var want = {};
+    if (pfCkOn(doStray)) want.stray = 1;
+    if (pfCkOn(doUnpaint)) want.unpainted = 1;
+    if (pfCkOn(doText)) want.emptyText = 1;
+    if (!want.stray && !want.unpainted && !want.emptyText) {
+      res.ok = true; res.deleted = 0; res.failed = 0; res.skipped = 0;
+      res.message = "没有勾选任何清理项。";
+      return pfReturn(res);
+    }
+    // v11.18(雪糕): "清理整个文档的…包含隐藏和锁定的也删"。
+    //   ⇒ 不再按隐藏/锁定跳过, 全部列入清理名单。
+    //   ① 隐藏对象: remove() 本身就能删(隐藏不影响删除), 不需要改可见性。
+    //   ② 锁定对象: remove() 会抛 ⇒ 先临时解锁(只解离它最近的那个锁定节点), 删成功就不管,
+    //      删失败则**成对复原**锁定状态 —— 遵循"临时改用户状态必须同调用内复原"的铁律,
+    //      不允许出现"没删掉还把人家解锁了"的残留副作用。
+    var refs = [], locks = [], failed = 0, unlocked = 0;
+    pfJunkEach(doc, function (kind, it) {
+      if (!want[kind]) return;
+      refs.push(it);
+      var bi = null;
+      try { bi = pfBlockInfo(it); } catch (e) {}
+      locks.push((bi && bi.locked) ? bi.node : null);
+    });
+    // v11.19(审查 2 处修复):
+    //   ① 锁节点 **不是对象本身** 时(= 祖先组/图层被临时解锁), 删成功后也必须把锁还回去。
+    //      否则: 删掉了组里一个游离点, 却把用户锁着的整个组解锁了 —— 同样的残留副作用,
+    //      只不过方向反过来(旧版只处理"没删成"那一半)。
+    //   ② remove() 抛异常不等于失败: 若该对象已被**祖先**连带删除(引用失效, 读 typename 抛错),
+    //      它其实已经达成目的 ⇒ 不该计进 failed, 否则回执会吓人地写"N 处删除失败"。
+    function relock(node) { try { node.locked = true; } catch (eRL) {} }
+    for (var r = refs.length - 1; r >= 0; r--) {
+      var it = refs[r], lk = locks[r], didUnlock = false;
+      if (lk) {
+        try { if (pfClearBlock(lk, "locked")) didUnlock = true; } catch (eU) {}
+        if (didUnlock) unlocked++;
+      }
+      try {
+        it.remove();
+        if (didUnlock && lk && lk !== it) relock(lk);   // ① 删成功也要把祖先的锁还回去
+      } catch (eR) {
+        var alive = true;
+        try { var _tn19 = it.typename; } catch (eD) { alive = false; }
+        if (!alive) {                                   // ② 已被祖先带走: 不算失败
+          if (didUnlock && lk && lk !== it) relock(lk);
+          continue;
+        }
+        failed++;
+        if (didUnlock && lk) relock(lk);                // 真失败: 同样还原锁定
+      }
+    }
+    res.ok = true;
+    res.deleted = refs.length - failed;
+    res.failed = failed;
+    res.skipped = 0;
+    res.unlocked = unlocked;
+    res.message = (refs.length > 0 ? "已清理 " + (refs.length - failed) + " 个对象" : "未发现可清理的对象") +
+      (unlocked > 0 ? "（其中 " + unlocked + " 个原为锁定，已临时解锁）" : "") +
+      (failed > 0 ? "，" + failed + " 处删除失败(已还原其锁定状态)" : "") + "。";
+  } catch (err) {
+    res.ok = false;
+    res.error = "清理失败: " + String(err);
+  }
+  return pfReturn(res);
+}
+
+
 function pfDeleteHidden() {
   var res = { ok: false };
   try {
