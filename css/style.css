@@ -79,11 +79,25 @@ button, input { font-family: inherit; }
 .tname { font-size: 11px; color: #9c9c9c; font-weight: 400; }
 
 /* v11.13(雪糕选定方案 B「石墨深灰」): 底 #2c2c2e / hover #3a3a3a / 文字 #f0f0f0 /
-   disabled #232325 —— 禁用必须比常态更暗, 否则"禁用"看着比"能点"还醒目。 */
+   disabled #232325 —— 禁用必须比常态更暗, 否则"禁用"看着比"能点"还醒目。
+   v11.59(雪糕给截图指定): 改成"描边胶囊" —— 底色压暗一档 + 一圈 1px 亮描边,
+     常态 底 #212121 / 边 #424242; 悬停 底 #2f2f2f / 边 #4e4e4e。
+     ⚠ 规律: 描边恒比底色亮 **32 级**(0x42-0x21 = 33 / 0x4e-0x2f = 31), 改色时别破这层关系,
+       否则悬停时会看着"底和边各跳各的"。
+     ⚠ 截图实测按钮 **45px 高**(胶囊圆头 = 高度一半), 但站内口径锁 40px ⇒ **只取配色与描边,
+       不取高度**: 顶栏 61px = 10 + 40 + 10 + 1px 底边线, 按钮一高整个首屏就压。
+     ⚠ 齿轮按钮(.btn-gear)不跟 —— 它是透明无边的图标按钮, 与主行动按钮本就不同角色。 */
 .btn {
-  background: #2c2c2e;
+  background: #212121;
   color: #f0f0f0;
+  /* v11.59: 描边用 **内阴影** 而不是 border。真 border 会占盒模型 1px ⇒ 按钮 40 -> 42、
+     顶栏 61 -> 63、body 的 padding-top:61 立刻压住首屏 2px, 还要连带改 padding 和
+     v11.28 的「间距只许 6 档」白名单(9px 不在档内)。inset 阴影不参与布局, 视觉上
+     同样是"1px 亮边"; 仓库里 `.set-row.dragging` 就是这套写法, 不是新花样。
+     ⚠ `border: none` 必须留着 —— 删掉后浏览器默认的 `2px outset` 会顶上来,
+       按钮实测 44 高、顶栏 65(踩过一次)。 */
   border: none;
+  box-shadow: inset 0 0 0 1px #424242;
   border-radius: 999px; /* v9.0: 方案 C —— 三族按钮统一胶囊 */
   /* 定宽 115px = 原 100 × 1.15(雪糕原意"在 100px 基础上 +15%")。
      ⚠ 别改成 vw: v11.11 试过 15vw, 窄面板下反而**变窄**(面板 360 时只剩 76px, 比 100 窄 24px)。
@@ -98,9 +112,12 @@ button, input { font-family: inherit; }
   font-weight: 600;
   cursor: pointer;
 }
-/* v11.11: hover 由蓝系 #4a78d6 改为中性灰；v11.13: 方案 B —— #4a4a4a -> #3a3a3a */
-.btn:hover { background: #3a3a3a; }
-.btn:disabled { background: #232325; cursor: default; }
+/* v11.11: hover 由蓝系 #4a78d6 改为中性灰；v11.13: 方案 B —— #4a4a4a -> #3a3a3a
+   v11.59(雪糕给截图指定): 底 #3a3a3a -> #2f2f2f, 描边同步提亮 #424242 -> #4e4e4e。 */
+.btn:hover { background: #2f2f2f; box-shadow: inset 0 0 0 1px #4e4e4e; }
+/* v11.59: 底色由 #232325 压到 #1a1a1c —— 常态压暗到 #212121 后, 原来的 #232325 反而
+   **比常态更亮**, 违反 v11.13「禁用必须比常态更暗」; 描边同步压到 #2e2e30(比常态暗一档)。 */
+.btn:disabled { background: #1a1a1c; box-shadow: inset 0 0 0 1px #2e2e30; cursor: default; }
 
 /* 卡片内的一键操作按钮: 红色、放大 */
 .btn-action {
@@ -165,7 +182,21 @@ label.chk input[type="checkbox"] {
   /* v11.1: 左右 12 -> 15, 与 .card 外沿对齐(卡片父容器 .results 左右内边距正是 15)。
      改后文字墨迹落点 15 + 描边 2 + 内边距 14 = 31, 与卡片正文 15 + 15 = 30 只差 1px;
      原来那 12 会让提示条比卡片两侧各宽 3px, 看着"顶出来了"。 */
-  margin: 10px 15px;
+  /* v11.36(雪糕): 下边距 10 -> 0 —— 下方紧接 .results 的 padding-top 10,
+     于是"顶栏→提示"是 10 而"提示→首卡"成了 10 + 10 = 20, 看着头重脚轻。
+     归零后上下都是 10, 与卡片间距 10 同一节奏。⚠ .notice 同改, 两者必须一致。 */
+  /* v11.44: 文档流 -> **底部固定浮层** —— 雪糕: "选中定位后的提示框在最上面, 我还需要滚上去才能看到"。
+     面板是纵向长列表, 操作点在下方, 提示必须在视口内。顺手解决另一个老问题:
+     原实现插在 topbar 与 #results 之间, 出现时会把整页内容往下推 ~56px。
+     ⚠ 不再参与文档流 ⇒ margin 归零, 位置由 left/right/bottom 决定。
+     ⚠ .notice 与 .error 互斥显示, 共用同一位置, 两者必须保持一致。
+     ⚠ v11.36 那条"上下各 10 对称"的口径作废 —— 不在文档流里就没有边距可谈。 */
+  position: fixed;
+  left: 15px;
+  right: 15px;
+  bottom: 12px;
+  z-index: 30;
+  margin: 0;
   padding: 10px 15px;
   background: #1f1f1f;
   /* v9.2: 依雪糕要求去掉左侧那条 4px 竖条, 外层描边 1px -> 2px 补回一点分量。
@@ -180,7 +211,19 @@ label.chk input[type="checkbox"] {
 /* 成功提示(黑底绿边) */
 .notice {
   /* v11.1: 同 .error, 左右 12 -> 15 */
-  margin: 10px 15px;
+  /* v11.36: 同 .error —— 下边距 10 -> 0(上下各 10, 对称) */
+  /* v11.44: 文档流 -> **底部固定浮层** —— 雪糕: "选中定位后的提示框在最上面, 我还需要滚上去才能看到"。
+     面板是纵向长列表, 操作点在下方, 提示必须在视口内。顺手解决另一个老问题:
+     原实现插在 topbar 与 #results 之间, 出现时会把整页内容往下推 ~56px。
+     ⚠ 不再参与文档流 ⇒ margin 归零, 位置由 left/right/bottom 决定。
+     ⚠ .notice 与 .error 互斥显示, 共用同一位置, 两者必须保持一致。
+     ⚠ v11.36 那条"上下各 10 对称"的口径作废 —— 不在文档流里就没有边距可谈。 */
+  position: fixed;
+  left: 15px;
+  right: 15px;
+  bottom: 12px;
+  z-index: 30;
+  margin: 0;
   padding: 10px 15px;
   background: #1f1f1f;
   /* v9.2: 同 .error —— 去左侧竖条, 外层描边 1px -> 2px */
@@ -283,6 +326,12 @@ label.chk input[type="checkbox"] {
 }
 /* 三颗等宽后空隙已无作用(留着会把等宽分配挤偏), 本弹层内直接隐藏。 */
 .set-modal .set-gap { display: none; }
+/* v11.37(雪糕): 设置弹层标题补左右 10px。
+   v11.1 ③ 只给 .set-sub / .set-hint 补了 10px 去对齐复选框行, 漏了标题 ——
+   于是「设置」二字(21)比下方说明行 / 复选框行(31)左出 10px, 实测肉眼可见。
+   ⚠ 必须限定 .set-modal: 确认框的 .modal-msg 没有左右内距, 全局给 .modal-title
+     加 padding 会让标题(31)与正文(21)错开, 把好的那个改坏。 */
+.set-modal .modal-title { padding: 0 10px; }
 
 /* v10.0: 顶栏右侧动作区(设置齿轮 + 开始检查),与按钮同高对齐 */
 .top-actions { display: inline-flex; align-items: center; gap: 8px; flex: none; }
@@ -407,16 +456,93 @@ label.chk input[type="checkbox"] {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 15px;
+  /* v11.38(雪糕): 8/8 -> 10/6。上下**和仍是 16** ⇒ 卡头恒 37px、九张卡零位移。
+     动机: 用 Range 量墨迹发现「上沿→标题 9 / 标题→首块 17~18 / 末块→下沿 12」——
+     中间比上下大近一倍, 看着标题离内容远、又贴着卡片上沿。
+     抬上内距 2px 让标题离上沿 11, 收下内距 2px 把标题与内容拉到 11。
+     ⚠ 6 档(2/6/8/10/15/20)内要和为 16 只有 8/8、6/10、10/6 三种; 6/10 是反方向
+       (标题更贴上沿); 12px 已在 v11.28 从白名单删掉, 用不了。 */
+  padding: 10px 15px 6px;
   background: #1b1b1b;
   /* 卡头与卡体同色, 无内阴影分隔线 —— 分块只靠 10px 卡片间距。
      ⚠ 不加 border: 会让卡头 37 -> 38px(项目要求卡头零位移)。
-     标题 14px; 卡头高 37px = 8 + 徽标 21 + 8, **由徽标决定**, 字号不参与 ⇒ 改字号零位移。
-     ⚠ 上下 8px 刻意不动(雪糕选"卡头上下保持 8"): 只动上会让标题偏下, 上下都动则 51px 太空。 */
+     标题 14px; 卡头高 37px = 10 + 徽标 21 + 6, **由徽标决定**, 字号不参与 ⇒ 改字号零位移。 */
   font-weight: 600;
   font-size: 14px;
 }
 .card-head .chips { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+/* v11.41: 卡头定位按钮。几何约束: 21×21 与 .chip 同高(11px 行 + 2×2 内距 + 2×1 边框)
+   ⇒ 卡头内容高仍是 21, .card-head 恒 37px, 九卡零位移。
+   ⚠ 不要再往上加 margin/padding —— 一旦超过 21 就会把卡头顶开。
+   ⚠ svg 必须 pointer-events:none: 委托里靠 data-locate 识别, 点中 <path> 就认不到了。
+   配色: 灰字 #9c9c9c, hover 提亮到白 + 深灰底, 与顶栏按钮同一套反馈。 */
+.card-locate {
+  width: 21px;
+  height: 21px;
+  flex: 0 0 21px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #9c9c9c;
+  cursor: pointer;
+}
+.card-locate:hover { color: #ffffff; background: #2c2c2e; }
+.card-locate:active { background: #3a3a3a; }
+.card-locate svg { pointer-events: none; }
+/* v11.53: 卡⑥ 每块标题行内的小定位按钮(雪糕: "放到我框起来的地方, 每个选择是选当前的内容")。
+   跟在"N 处"后面, 不是行尾 —— 行尾 .row-h 是样本截断提示, 两样东西各占一头。
+   16×16 比卡头那颗(21)小一档: 它与 12px 标题同处一行, 按 21 会把行撑高 5px。
+   ⚠ svg 同样 pointer-events:none(委托按 data-locate / data-sub 识别)。
+   ⚠ vertical-align 必须写 0(实测, 别凭感觉写负值): 16px 盒子默认按 baseline 摆,
+     底部落在文字基线上 ⇒ 视觉略偏高。曾写 -3px 想把中心压下来, 结果按钮中心
+     反而低于行盒中心 2.75px, 且把 .ink-block 的行盒从 20 撑到 21.5(每块标题都变高)。
+     无头实测: vertical-align:0 → 中心差 +0.5px、行盒仍 20; middle → +1.77。取 0。
+   ⚠ 按钮是 .row-t 的**兄弟**, 不是子元素(v11.54) —— 见下一条 .ink-block .row-t。
+     按钮与标题的间距由 .ink-block 的 gap:8px 给, 这里不再留 margin-left。 */
+.ink-loc {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #9c9c9c;
+  cursor: pointer;
+  vertical-align: 0;
+}
+.ink-loc:hover { color: #ffffff; background: #2c2c2e; }
+.ink-loc:active { background: #3a3a3a; }
+.ink-loc svg { pointer-events: none; }
+/* v11.54: 卡⑥ 块标题行 —— 标题让位、省略号收尾(与卡头标题同一套降级)。
+   起因: 块内按钮占 22px, 实测面板宽 ≤280px 时「油墨总量220~300」标题折成两行
+     (该行 40px, 其余 20/21); 去掉按钮同一位置回到 21px ⇒ 是按钮挤出来的。
+   flex 从 1 1 auto 收成 0 1 auto: 标题按内容宽, 多出来的空间交给 .row-h 的
+     margin-left:auto 吸收 —— 按钮才能紧跟"N 处", 而不是被推到行尾。
+   min-width:0 必须留着(flex item 默认 min-width:auto 会让 overflow 不生效)。 */
+.ink-block .row-t {
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* v11.54: 极窄面板(<300px)下**优先保住"N 处"这个数字** —— 让位的是右侧的截断提示。
+   实测 280px: 光靠省略号会把计数一起吃掉(变成"油墨总量220~300 …"), 数字比
+   "仅列出前 5 处"重要得多。媒体查询在 WebView1(Chromium 61)上可用。
+   ⚠ 无头验证注意: headless 的 innerWidth 恒 500, 媒体查询测不到 280 视口 ⇒
+     这条是用**等效注入**(`.ink-block .row-h{display:none}`)验的:
+     注入后四行都是 20px 且 scrollWidth 不再溢出(N 处 保住)。 */
+@media (max-width: 300px) {
+  .ink-block .row-h { display: none; }
+}
 /* v10.3: 卡头标题单行省略。徽标是 flex-shrink:0 不会换行, 窄面板下被挤折的是标题:
    实测 260px 时卡① 卡头 37 -> 48px、卡③(3 个徽标) 37 -> 80px。
    现在让标题让位、溢出打省略号, 卡头恒为一行。 */
@@ -425,8 +551,14 @@ label.chk input[type="checkbox"] {
    卡内 11px 的文字(汇总行/截断提示/小标题/.dim)长期比样本行挤。固定后卡内未写行高的文字同盒。
    ⚠ ul.list li(17px) 与 table.kv td(16px) 是写死的, 各自加数后 = 22px 节奏, 不受本行影响。
    v10.57(雪糕定): 内距 6px 15px 10px —— 横向与"内容距卡片边缘 15px"统一。
-     下取 10 而非 15: 行盒半行距还会再给 4px ⇒ 视觉落点 14~16px, 与左右基本齐平。 */
-.card-body { padding: 6px 15px 10px; line-height: 20px; }
+     下取 10 而非 15: 行盒半行距还会再给 4px ⇒ 视觉落点 14~16px, 与左右基本齐平。
+   v11.38(雪糕): 上 6 -> 2。卡头下内距同时 8 -> 6, 两者相加 12, 标题与内容的墨迹间隔
+     从 17~18 收到 11 —— 与"上沿→标题 11"等高, 三处墨迹基本齐平(文字收尾的卡是 11/11/12)。
+     ⚠ 下内距保持 10 不变: 收到 10 之后底部墨迹 12, 正好与上部 11 对得上;
+       放到 15 会变成 17~26, 底部明显比上部空。
+     ⚠ 末块是 `.action-row` 按钮的那几张卡(隐藏/字体/图片嵌入/清理), 底部墨迹天然是 21
+       —— 按钮 40 高、文字居中, 离底比纯文字多半行。这是内容形态差异, 拉不平, 别为它改内距。 */
+.card-body { padding: 2px 15px 10px; line-height: 20px; }
 /* v10.3: 卡体首元素不再白吃 margin-top —— 卡⑥ 只渲染汇总行时, .ink-rest 的 8px
    上边距没人抵消, 实测首行离卡头 16px, 而其它卡 8~10px。 */
 .card-body > :first-child { margin-top: 0; }
@@ -459,12 +591,15 @@ table.kv { width: 100%; border-collapse: collapse; }
    行之间原先靠 1px #333 分隔,现改为纯留白分层 —— 与 v6.0"六卡不用描边、靠底色差分块"一致。
    注: 出血/色彩模式本就是独立的 <div>,不参与本规则。 */
 table.kv td {
-  /* v11.1: 左内边距 6 -> 0。原来墨迹落点 15(卡片内边距) + 6 = 21, 比卡片内其它文字
-     多缩进 6px(实测), 与 .card-body / 表格首行标题都不齐。
-     只抹左边、右边 6 留着: 那 6px 是第 1 列与第 2 列之间唯一的水平间隙
+  /* v11.34(雪糕): 左内距 0 -> 10, 让画板尺寸行与 ul.list 清单同一基线(墨迹 15 -> 25)。
+     这是**推翻 v11.1 的决定**: v11.1 当年特意把 6px 归零, 理由是"比卡体内其它文字多缩进
+     6px, 不齐"; 现在改为按"明细行一律缩进"来对齐 —— ul.list 那 7 处是 25, 表格贴 15,
+     结果卡① 看着没缩进。三处一起改(本文件另有 .ink-tbl li / .sw-tbl li)。
+     ⚠ 10px 在间距 6 档(2/6/8/10/15/20)之内, 不新增例外。
+     右边 6 留着: 那 6px 是第 1 列与第 2 列之间唯一的水平间隙
      (第 1 列 white-space:nowrap + width:40%, 长画板名会把列撑开, 没有它就贴一起)。
      竖向 3px 不动 —— 见下方 v9.3 那条行距节奏的算术。 */
-  padding: 3px 6px 3px 0; /* v11.28: 竖向 3px 不并入间距档 —— v9.3 的 22px 行节奏靠它(16+3×2) */
+  padding: 3px 6px 3px 10px; /* v11.28: 竖向 3px 不并入间距档 —— v9.3 的 22px 行节奏靠它(16+3×2) */
   vertical-align: top;
   /* v9.3: 依雪糕要求, 样本行行距与卡③④⑤⑥ 清单统一(原 24px, v11.30 全站收到 22px)。
      算术: 行盒 16px + 上下内边距 3px x 2 = 22.0。
@@ -518,6 +653,25 @@ ul.list li {
   word-break: normal;
 }
 ul.list li .trunc { max-width: 100%; display: block; }
+
+/* v11.57(雪糕): "名字 + 值"两列行 —— 卡③字号块 / 卡⑤分辨率块共用。
+   起因: "这里都没有对齐"。旧写法把名字和值放在**同一文本流**里(名字 + " — " + 值),
+   值的 x 坐标完全由名字宽度决定, 实测同一列表内差 22px(编号 162.2 / 版权说明 184.2);
+   而且 .trunc 挂在 li 上时, 名字超长会把值一起省略掉。
+   做法: li 变 flex 两列, **左列定宽 62%**(名字列固定, 超长自己降级省略号),
+   值 flex:0 0 auto ⇒ 值的**左缘**永远落在 62%+gap 处, 所有行对齐成一条竖线。
+   v11.58(雪糕改选 B): 先做过一版"值贴右内缘"(右对齐), 他要"左列定宽" ⇒ 改回 B。
+     两版的差别只在 .nm 的 flex: A 是 1 1 auto(值右对齐), B 是 0 0 62%(值左对齐)。
+   ⚠ .trunc **不要**再加到 li 上: li 是 flex 容器, white-space:nowrap + overflow:hidden
+     会和列的压缩/省略打架(实测会把 .vl 一起裁掉)。
+   ⚠ 行高不受影响: 仍是 17px line-height + 2×2 内距 = 21px 盒 + 1px 间距 = 22 节奏。
+   ⚠ 单位前的空格由 JS 拼字符串时给("4.2 pt" / "170.8 ppi"), 这里不管。 */
+ul.list li.kv2 { display: flex; align-items: baseline; gap: 8px; }
+ul.list li.kv2 .nm {
+  flex: 0 0 62%; min-width: 0;      /* 左列定宽(B 方案) —— 值的左缘因此永远在 62%+gap 处 */
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; word-break: normal;
+}
+ul.list li.kv2 .vl { flex: 0 0 auto; white-space: nowrap; }
 
 /* 小标题: 结构标签必须**强于**其下的样本行(明细), 故色取 #d6d6d6(正文档), 不能更暗。
    外边距 8px 0 6px, 与卡内块间距同档。 */
@@ -602,7 +756,7 @@ ul.list li .trunc { max-width: 100%; display: block; }
    清单行盒 19px(行距 24), 差 5px ⇒ 图里"紧一块松一块"。现在:
    .ink-tbl li 18 + 2×2 = 22 / ul.list li 17 + 2×2 + 1 = 22 / table.kv td 16 + 3×2 = 22。
    ⚠ 行盒不参与换行宽度 ⇒ 列宽、省略号位置、等宽列对齐全都不受影响。 */
-.ink-tbl li { display: flex; align-items: center; gap: 8px; padding: 2px 0; font-size: 12px; line-height: 18px; }
+.ink-tbl li { display: flex; align-items: center; gap: 8px; padding: 2px 0 2px 10px; font-size: 12px; line-height: 18px; } /* v11.34: 左内距 0 -> 10(明细统一缩进, 同 table.kv / .sw-tbl) */
 .ink-tbl .ik-dot { width: 15px; height: 15px; flex: none; border-radius: 999px; border: 1px solid #4a4a4a; box-sizing: border-box; }
 .ink-tbl .ik-line { width: 15px; height: 2px; flex: none; border-radius: 999px; }
 .ink-tbl .ik-wh { font-size: 12px; color: #d6d6d6; flex: none; width: 26px; }
@@ -625,7 +779,7 @@ ul.list li .trunc { max-width: 100%; display: block; }
    ⚠ "在用"不标绿: 一列全绿看不出重点, 只把"未使用 > 0"标红。
    ⚠ 数字列右对齐(表格习惯), 名称列吃剩余宽度。 */
 .sw-tbl { list-style: none; margin: 6px 0 0; padding: 0; }
-.sw-tbl li { display: flex; align-items: center; padding: 2px 0; font-size: 12px; line-height: 18px; } /* v11.30: 16 -> 18(行距 22) */
+.sw-tbl li { display: flex; align-items: center; padding: 2px 0 2px 10px; font-size: 12px; line-height: 18px; } /* v11.30: 16 -> 18(行距 22); v11.34: 左内距 0 -> 10 */
 .sw-tbl .sw-nm { flex: 1 1 auto; min-width: 0; color: #d6d6d6; }
 .sw-tbl b { flex: none; width: 48px; text-align: right; font-weight: 400; color: #b6b6b6; }
 .sw-tbl .sw-h b { font-size: 11px; color: #9c9c9c; }

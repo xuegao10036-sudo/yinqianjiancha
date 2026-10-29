@@ -4,11 +4,11 @@
      (真机出现"index 新、main.js 旧"的混血状态)。升面板版本时此处同步改。 -->
 <ExtensionManifest Version="8.0"
     ExtensionBundleId="com.workbuddy.ai.preflight"
-    ExtensionBundleVersion="11.33.0"
+    ExtensionBundleVersion="11.63.0"
     ExtensionBundleName="AI印前检查面板"
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
   <ExtensionList>
-    <Extension Id="com.workbuddy.ai.preflight.panel" Version="11.33.0"/>
+    <Extension Id="com.workbuddy.ai.preflight.panel" Version="11.63.0"/>
   </ExtensionList>
   <ExecutionEnvironment>
     <HostList>
