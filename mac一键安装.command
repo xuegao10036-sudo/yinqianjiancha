@@ -18,10 +18,17 @@ cp -R "$SRC/CSXS" "$DEST/"
 cp -R "$SRC/css" "$DEST/"
 cp -R "$SRC/js" "$DEST/"
 cp -R "$SRC/jsx" "$DEST/"
-# v10.44 的扩展菜单图标在 images/ —— 与 Windows bat 同款, 漏拷会让菜单/扩展栏没有图标
-cp -R "$SRC/images" "$DEST/"
+# v10.44 menu icon lives in images/. The repo mirror does not include it, so a package
+#   downloaded from GitHub has no images/ at all. Missing icon is cosmetic (the panel
+#   still opens) -> skip with a note instead of failing the install. (v11.63b, same as the bat)
+if [ -d "$SRC/images" ]; then
+  cp -R "$SRC/images" "$DEST/"
+else
+  echo "      NOTE - no images/ in this package; menu icon will be missing."
+  echo "             The panel itself works fine."
+fi
 cp "$SRC/index.html" "$DEST/"
-if [ -f "$DEST/CSXS/manifest.xml" ] && [ -f "$DEST/js/main.js" ] && [ -f "$DEST/jsx/preflight.jsx" ] && [ -f "$DEST/images/icon.png" ]; then
+if [ -f "$DEST/CSXS/manifest.xml" ] && [ -f "$DEST/js/main.js" ] && [ -f "$DEST/jsx/preflight.jsx" ] && [ -f "$DEST/index.html" ]; then
   echo "      OK - files copied."
 else
   echo "      FAILED - copy step. Check the folder is not inside the downloaded ZIP."

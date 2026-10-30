@@ -19,20 +19,29 @@ if exist "%DEST%\CSXS" rmdir /S /Q "%DEST%\CSXS"
 if exist "%DEST%\css" rmdir /S /Q "%DEST%\css"
 if exist "%DEST%\js" rmdir /S /Q "%DEST%\js"
 if exist "%DEST%\jsx" rmdir /S /Q "%DEST%\jsx"
-rem v10.44: 扩展菜单图标(images/icon.png)随包分发
+rem v10.44: extension menu icon (images/icon.png) ships with the package
 if exist "%DEST%\images" rmdir /S /Q "%DEST%\images"
 rem v10.28: each xcopy checks its own errorlevel - a trailing check only reflects the last copy
 xcopy "%~dp0CSXS" "%DEST%\CSXS" /E /I /Y /Q >nul || set "FAIL=1"
 xcopy "%~dp0css"  "%DEST%\css"  /E /I /Y /Q >nul || set "FAIL=1"
 xcopy "%~dp0js"   "%DEST%\js"   /E /I /Y /Q >nul || set "FAIL=1"
 xcopy "%~dp0jsx"  "%DEST%\jsx"  /E /I /Y /Q >nul || set "FAIL=1"
-xcopy "%~dp0images" "%DEST%\images" /E /I /Y /Q >nul || set "FAIL=1"
+rem v11.63b: images/ only carries the menu icon. The repo mirror does not include it,
+rem   so a downloaded package may have no images/ at all. Missing icon = cosmetic,
+rem   the panel works anyway -> skip instead of failing the whole install.
+if exist "%~dp0images" (
+  xcopy "%~dp0images" "%DEST%\images" /E /I /Y /Q >nul || set "FAIL=1"
+) else (
+  echo       NOTE - no images\ in this package; menu icon will be missing.
+  echo              The panel itself works fine.
+)
 xcopy "%~dp0index.html" "%DEST%\" /E /I /Y /Q >nul || set "FAIL=1"
 if not exist "%DEST%\CSXS\manifest.xml" set "FAIL=1"
 if not exist "%DEST%\css\style.css" set "FAIL=1"
 if not exist "%DEST%\js\main.js" set "FAIL=1"
 if not exist "%DEST%\jsx\preflight.jsx" set "FAIL=1"
-if not exist "%DEST%\images\icon.png" set "FAIL=1"
+rem v11.63b: only verify the icon when the package actually shipped one
+if exist "%~dp0images" if not exist "%DEST%\images\icon.png" set "FAIL=1"
 if not exist "%DEST%\index.html" set "FAIL=1"
 if defined FAIL echo       FAILED - see TROUBLESHOOTING below.
 if not defined FAIL echo       OK - files copied.
@@ -55,7 +64,8 @@ echo   NEXT : restart Adobe Illustrator
 echo          Menu: Window -^> Extensions -^> the preflight panel
 echo.
 
-if not defined FAIL echo All done. You can close this window.
+rem v11.63b: "All done" and "registry FAILED" must not be printed together
+if not defined FAIL if not defined REGFAIL echo All done. You can close this window.
 if not defined FAIL if defined REGFAIL echo NOTE: files copied, but the registry switch FAILED - see [2/3] above.
 if defined FAIL echo ------------------------------------------------------------
 if defined FAIL echo   TROUBLESHOOTING
@@ -77,7 +87,11 @@ rem   窗口会一闪而过, 用户根本看不到 FAILED / TROUBLESHOOTING 提�
 rem v10.33: 原写成 `timeout ... || pause` 后又跟一句 pause ⇒ timeout 走完还要再按一次键
 rem   (外部审查 v10.32 第 2 条实锤)。改为只用 pause —— 它是 cmd 内建, 不受组策略拦,
 rem   按键即走比"干等 30 秒"更自然。
+rem v11.63b: hold the window for the registry-only failure too -- otherwise the FIX
+rem   hint scrolls away and the window closes before anyone can read it.
 if defined FAIL echo Press any key to close this window...
+if not defined FAIL if defined REGFAIL echo Press any key to close this window...
 if defined FAIL pause >nul
+if not defined FAIL if defined REGFAIL pause >nul
 if defined FAIL exit /b 1
 exit /b 0

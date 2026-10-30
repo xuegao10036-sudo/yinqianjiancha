@@ -1,8 +1,13 @@
 # 换行符统一：仓库内一律 LF，检出时按平台/类型还原。
-# 关键：Windows 批处理必须是 CRLF —— LF 的 .bat 在 cmd.exe 里
-# 跑 if (...) / for 块可能异常；从 GitHub 克隆到 Windows 尤其容易踩到。
-
-*.bat  text eol=crlf
+#
+# ⚠ .bat 必须用 `-text`（不是 `text eol=crlf`），原因是一次真实事故：
+#   `eol=crlf` 只在 **git clone / checkout** 时转换，网页 Download ZIP **不转换**，
+#   打出来的就是仓库里的原始 blob。原来仓库里存的是 LF，于是所有走 ZIP 安装的人
+#   拿到的 .bat 都是 LF；cmd.exe 缺 CR 时按块读文件，含中文注释的行会错位，
+#   症状是 'ut' / 'pause`' / 半行中文 不是内部或外部命令，安装脚本跑到一半就散架。
+#   所以：仓库里直接存 CRLF，并让 git 一个字节都别动。
+#   ⚠ 改 .bat 请用 其他资料文件/_push.js 推（它会把 .bat 强制转 CRLF 再上传）。
+*.bat  -text
 
 *.js   text eol=lf
 *.jsx  text eol=lf
