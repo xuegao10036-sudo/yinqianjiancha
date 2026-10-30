@@ -81,12 +81,19 @@ if not defined FAIL powershell -NoProfile -WindowStyle Hidden -EncodedCommand QQ
 if defined FAIL powershell -NoProfile -WindowStyle Hidden -EncodedCommand QQBkAGQALQBUAHkAcABlACAALQBBAHMAcwBlAG0AYgBsAHkATgBhAG0AZQAgAFMAeQBzAHQAZQBtAC4AVwBpAG4AZABvAHcAcwAuAEYAbwByAG0AcwA7ACAAWwBTAHkAcwB0AGUAbQAuAFcAaQBuAGQAbwB3AHMALgBGAG8AcgBtAHMALgBNAGUAcwBzAGEAZwBlAEIAbwB4AF0AOgA6AFMAaABvAHcAKAAiAIlbxYgxWSWNAf/mi8VgwYnRnnKCp2M2UvBTl3rjUxr/h2X2Tg1ZNlL6URmVDP8WYgOM1YsAX3NRmVFlUTFZJY0CMCIALAAgACIAiVvFiDFZJY0iACwAIAAiAE8ASwAiACwAIAAiAEUAcgByAG8AcgAiACkA
 
 echo.
-rem v10.32: 兜底等待 —— 正常路径下 powershell 弹窗会一直挂住直到用户点 OK(上面那句不会
-rem   执行到)。但若这台机器上 powershell 被 AppLocker/组策略拦掉, 上面两句会**立即失败返回**,
-rem   窗口会一闪而过, 用户根本看不到 FAILED / TROUBLESHOOTING 提示。这里补一句纯内建等待。
-rem v10.33: 原写成 `timeout ... || pause` 后又跟一句 pause ⇒ timeout 走完还要再按一次键
-rem   (外部审查 v10.32 第 2 条实锤)。改为只用 pause —— 它是 cmd 内建, 不受组策略拦,
-rem   按键即走比"干等 30 秒"更自然。
+rem v10.32: fallback hold. Normally the msgbox below blocks until the user clicks OK and
+rem   the line after it never runs. But if PowerShell is blocked by AppLocker or group
+rem   policy, both msgbox calls return at once and this window flashes past, so nobody
+rem   ever sees the FAILED / TROUBLESHOOTING text. Hence a plain builtin wait here.
+rem v10.33: the old form was "timeout ... or pause" followed by another pause, so the
+rem   window waited twice (found in the v10.32 external review). Now pause only: it is a
+rem   cmd builtin (not blocked by group policy) and a keypress beats a blind 30s wait.
+rem v11.63c: this block used to be in Chinese. The .bat is UTF-8 but cmd reads it in the
+rem   system codepage (GBK on a Chinese Windows), so the bytes were re-decoded into
+rem   garbage that broke the parser idea of where quotes and pipes end. The tail then ran
+rem   fragments such as ut or pause as commands -- exactly the "not recognized as an
+rem   internal or external command" lines users reported. Keep this file ASCII-only:
+rem   no Chinese, no pipes, no backticks, no full-width punctuation on rem lines.
 rem v11.63b: hold the window for the registry-only failure too -- otherwise the FIX
 rem   hint scrolls away and the window closes before anyone can read it.
 if defined FAIL echo Press any key to close this window...
