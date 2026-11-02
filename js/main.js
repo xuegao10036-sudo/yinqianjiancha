@@ -8,11 +8,11 @@
   //   run() 超时后补一枚宽限计时器兜底解锁 scanBusy(防 jsx 挂死锁面板)
   // v11.0: 版本号跃升至 11.0(代码内容与 v10.60 一致, 仅版本标识变更)
   // v11.2: 全站胶囊按钮统一 40px 高(CSS 改动, 前端逻辑无变化), 版本链同步
-  var JS_BUILD = "20261029-8";
+  var JS_BUILD = "20261102-2";
   // 必须与 jsx/preflight.jsx 里的 PF_BUILD 保持一致。
   // JSX 每次返回都会带上它的构建号,前端据此判断 ExtendScript 引擎里
   // 加载的是不是当前版本 —— 不一致就强制 $.evalFile 重载(见 execJsx)。
-  var JSX_BUILD = "11.63";
+  var JSX_BUILD = "11.68";
   // v10.2 收尾: 「耗时较长」提示阈值 —— 原先 20000 在 run() 与 execAction() 各写一遍,
   //   连提示语里的「20 秒」也是手写 ⇒ 改口径要动 3 处、漏一处就文案与行为不一致。收成一处。
   var BUSY_TIMEOUT_MS = 20000;
@@ -244,12 +244,14 @@
   //     改法: viewBox 按**墨迹形心** (388.2, 530.1) 对称取 —— 宽 881.4 使
   //       x 从 -52.5 到 828.9(中心 388.2), 高 932.6 使 y 从 63.8 到 996.4(中心 530.1)。
   //       实测 dx = -0.12%。图形左边界仍是 195.1, 一个点没动, 只是横向留白重分配。
-  //     ⚠ 宽高比不等(0.945): 正方形 12×12 里 preserveAspectRatio 取 xMidYMid meet,
+  //     ⚠ 宽高比不等(0.945): 正方形 15×15 里 preserveAspectRatio 取 xMidYMid meet,
   //       按高缩放后横向居中, 不额外偏移。
+  //   v11.65(雪糕): "选择的那个箭头图标大点吧" —— 12 -> 15。盒子仍 21×21(卡头 37px
+  //     零位移: 卡头高由徽标 21 决定, svg 只在盒内居中), 15 < 21 不会顶出按钮。
   function locateBtn(n) {
     return '<button class="card-locate" data-locate="' + n + '"' +
       ' title="选中该卡的全部问题对象 (锁定/隐藏的只提示位置，不改状态)">' +
-      '<svg viewBox="-52.5 63.8 881.4 932.6" width="12" height="12" aria-hidden="true">' +
+      '<svg viewBox="-52.5 63.8 881.4 932.6" width="15" height="15" aria-hidden="true">' +
       '<path fill="currentColor" d="M828.9 697.6L643.3 512 195.1 63.8v896.4l262.5-262.6z"/>' +
       '</svg></button>';
   }
@@ -279,8 +281,11 @@
   //   卡名同时统一成"只写管什么、不写做什么"(雪糕 2026-10-29):
   //     画板 · 出血 · 色彩 → 画板; 隐藏图层 · 对象 → 隐藏; 字体 · 转曲 → 字体;
   //     油墨 · 描边粗细 → 油墨。顺带解决卡③ 标题被三颗徽标挤成省略号的问题(需 71px 只给 46px)。
+  //   v11.64(雪糕): 「油墨」改回带后缀 —— 「油墨 · 描边」。理由: 这张卡同时管
+  //     油墨总量(>300 / 220~300)、色版<5%、描边<0.1mm 三类, 光写"油墨"看不出还管描边。
+  //     后缀只留"描边"二字(不是原来的"描边粗细"), 长度 6 字 ≈ 84px, 卡头放得下。
   var CARD_N = 8;
-  var CK_NAMES = ["画板", "隐藏", "字体", "图片", "油墨", "叠印", "色板", "清理"];
+  var CK_NAMES = ["画板", "隐藏", "字体", "图片", "油墨 · 描边", "叠印", "色板", "清理"];
   // v10.1: 卡片显示顺序(位置 -> 卡号)。拖动只改显示; 传给 jsx 的开关仍按固定卡序(ckArgs)
   // v11.63: 清理(7)在色板(6)之前 —— 沿用 v11.15 起的排法(清理紧跟叠印/油墨之后)。
   var CARD_ORDER_DEF = [0, 1, 2, 3, 4, 5, 7, 6];
@@ -1167,15 +1172,17 @@
   //   "描边<0.1mm" 那颗只选描边过细的图形、"色版<5%" 那颗只选色版极浅的,
   //   不会再一锅端。
   //   ⚠ sub 走 data-sub 传回 onLocate —— 白名单校验在 onLocate 里, 这里只管发。
-  //   ⚠ 图标与卡头那颗同一 path/同一 viewBox, 只是显示 9×9(16px 盒)。
+  //   ⚠ 图标与卡头那颗同一 path/同一 viewBox, 只是显示 12×12(16px 盒)。
   //   ⚠ v11.55 同上: viewBox 按**墨迹形心**对称, 不是按包围盒 —— 详见 locateBtn 注释。
   // v11.63: 把卡⑥ 的块内定位按钮抽成通用版 —— 合并后的「图片」卡要在两段各放一颗
   //   (4 = 未嵌入的链接图, 5 = 分辨率偏低的图)。svg 与几何必须与卡⑥ 完全一致。
+  //   v11.65(雪糕): 9 -> 12(与卡头那颗同比例放大)。盒子仍是 16×16、vertical-align 仍 0
+  //     ⇒ 行盒仍 20px, 卡⑥ 四块与图片卡两段的行高一个像素都不动。
   function locBtnAt(n, sub, tip) {
     return '<button class="ink-loc" data-locate="' + n + '"' +
       (sub ? ' data-sub="' + sub + '"' : "") +
       ' title="' + esc(tip || "只选中这一块的问题对象 (锁定/隐藏的只提示位置，不改状态)") + '">' +
-      '<svg viewBox="-52.5 63.8 881.4 932.6" width="9" height="9" aria-hidden="true">' +
+      '<svg viewBox="-52.5 63.8 881.4 932.6" width="12" height="12" aria-hidden="true">' +
       '<path fill="currentColor" d="M828.9 697.6L643.3 512 195.1 63.8v896.4l262.5-262.6z"/>' +
       '</svg></button>';
   }
@@ -1386,7 +1393,7 @@
         bleedHtml = '<div>出血不足 ' + thv("bleed") + 'mm 的画板 <b class="warn-t">' + badAbs.length + "</b> 个</div>" +
           '<ul class="list">' + badAbs.join("") + "</ul>";
       } else {
-        bleedHtml = '出血全部 ≥ ' + thv("bleed") + 'mm，<b class="good">达标</b>。';
+        bleedHtml = '出血全部 ≥ ' + thv("bleed") + 'mm，达标。';
       }
     } else {
       bleedHtml = '<span class="dim">无法测量</span>';
@@ -1396,7 +1403,7 @@
     // v4.0 形态A: 色彩模式永远平铺一行
     // v11.62(雪糕): "色彩模式: CMYK" -> "色彩模式 CMYK" —— 冒号统一去掉(见 renderMissingFonts 注释)
     var cmHtml = cmOk
-      ? '<div>色彩模式 <b class="white">CMYK</b></div>'
+      ? '<div>色彩模式 <b class="good">CMYK</b></div>'
       : '<div>色彩模式 <b class="bad-t">RGB</b> · 请转 CMYK (文件 → 文档颜色模式)。</div>';
     // v4.3: 徽标配色由色彩模式自身决定(CMYK=绿 / RGB=红),
     // 左边条颜色才代表整卡状态(出血不足=黄 / RGB=红),两者解耦
@@ -1414,11 +1421,13 @@
     // ===== 2. 隐藏对象 =====
     var hd = d.hidden || { layerCount: 0, itemCount: 0, layerNames: [], truncated: false };
     var hdTotal = (hd.layerCount || 0) + (hd.itemCount || 0);
-    var hdLevel = hdTotal > 0 ? "warn" : "ok";
+    // v11.66(雪糕选 B / P5): 卡片级与徽标级对齐 —— 原先是"卡黄条 + 红徽标", 看着像
+    //   "卡片没那么严重、徽标却很严重"。隐藏对象确实要处理 ⇒ 统一升到 bad。
+    var hdLevel = hdTotal > 0 ? "bad" : "ok";
     var hdHtml = "";
     if (hdTotal === 0) {
       // v7.1: 去掉冗余的"未发现"——卡片标题已表明检查项,正文直说状态
-      hdHtml = '无 <b class="white">隐藏图层、隐藏对象</b>。';
+      hdHtml = '无隐藏图层、隐藏对象。';
     } else {
       var hdHint = (hd.layerNames && hd.layerCount > hd.layerNames.length) ? capHint("个") : "";
       // v7.1: 去掉冗余的"发现"
@@ -1441,7 +1450,10 @@
       }
     }
     // v5.20: 有隐藏内容时徽标转红(左边条维持黄色,仅徽标级别改 bad)
-    return scanCk[1] ? card("隐藏", hdLevel, hdTotal > 0 ? hdTotal + " 个" : "无", hdHtml, hdTotal > 0 ? "bad" : "ok")
+    // v11.66(P1/P2): "12 个" -> "隐藏 12 个"(原写法数字打头、没名词); ok 态 "无" -> "无隐藏"。
+    return scanCk[1] ? card("隐藏", hdLevel,
+      hdTotal > 0 ? "隐藏 " + hdTotal + " 个" : "无隐藏",
+      hdHtml, hdTotal > 0 ? "bad" : "ok")
       : "";
   }
 
@@ -1452,7 +1464,8 @@
     var fHtml = "", fLevel, fChip, fChipLevel;
     var missingFonts = (d.fonts && d.fonts.missingFonts) ? d.fonts.missingFonts : [];
     var hasMissing = missingFonts.length > 0;
-    var missChip = hasMissing ? chip("bad", "缺字体 " + missingFonts.length) : "";
+    // v11.66(P1): 补量词 —— "缺字体 2" -> "缺字体 2 个"
+    var missChip = hasMissing ? chip("bad", "缺字体 " + missingFonts.length + " 个") : "";
     var tinyChip = "";
     // v5.24: htx 提前计算——全转曲文案与徽标合并计数都要用
     var htx = (d.hiddenText && d.hiddenText.count > 0) ? d.hiddenText : null;
@@ -1461,8 +1474,12 @@
       fChip = "已转曲";
       fChipLevel = "ok"; // 转曲状态本身是好的,徽标不跟随卡片红色;缺失风险由并列徽标承担
       // v5.24: 文案改单句"可见文字 已全部转曲，另有 N 个隐藏文字未转曲"
-      fHtml = '可见文字 <b class="good">已全部转曲</b>';
-      fHtml += htx ? '，另有 <b class="warn-t">' + htx.count + '</b> 个隐藏文字未转曲。' : '。';
+      // v11.67(雪糕选 C): ok 态统一成「无 X。」句式 —— 与卡②/④/⑥/⑦ 同形。
+      //   ⚠ 有隐藏文字时不能笼统说"无未转曲文字"(隐藏的也是文字) ⇒ 限定成"可见未转曲文字",
+      //     后半句照旧报隐藏处数, 语义不矛盾。
+      fHtml = htx
+        ? '无可见未转曲文字，另有 <b class="warn-t">' + htx.count + '</b> 个隐藏文字未转曲。'
+        : '无未转曲文字。';
       // v5.18: "隐藏图层/对象中的文字未计入…"提示灰字按用户要求移除
       if (hasMissing) fHtml += renderMissingFonts(missingFonts);
     } else {
@@ -1547,7 +1564,8 @@
             '<span class="nm">' + esc(s.t) + '</span>' +
             '<span class="vl">' + s.pt + " pt</span></li>";
         }).join("") + "</ul>";
-      tinyChip = chip("bad", "小字号 " + tiny.count);
+      // v11.66(P1): 补量词 —— "小字号 3" -> "小字号 3 处"(与"文本溢出 2 处"同词)
+      tinyChip = chip("bad", "小字号 " + tiny.count + " 处");
       fLevel = "bad";
     }
     // v5.21: 隐藏文字统计(树遍历只扫可见,隐藏的单独列出;字体名已并入缺失检测)
@@ -1622,15 +1640,28 @@
     } else if (missN > 0) {
       iLevel = "bad"; iChip = "缺失 " + missN + " 张";
     } else if (lowN > 0) {
-      iLevel = "warn"; iChip = "有 " + lowN + " 张偏低";
+      // v11.64: "有 2 张偏低" -> "偏低 2 张" —— 与"缺失 1 张"同形, 也符合 v11.61 定的
+      //   "名词打头 + 数字 + 量词"口径(旧写法是数字打头)。
+      iLevel = "warn"; iChip = "偏低 " + lowN + " 张";
     } else if (rsIncomplete) {
       iLevel = "warn"; iChip = "未完成";
     } else if (linkedN > 0) {
       iLevel = "warn"; iChip = "有链接图";
     }
-    // 一张图都没有: 与卡②"无 隐藏图层 / 隐藏对象。"同一形态, 不摆空行
+    // v11.64(雪糕选 B): 卡头补一颗**次徽标** —— 主徽标仍只报"最严重一档", 但叠加时
+    //   (比如既有缺失又有低清)光一颗看不出还有别的活儿要干。
+    //   口径: 次徽标只报"能下手处理"的那两类(偏低 / 结果不完整), **不报"有链接图"**
+    //     —— 有链接是常态, 段 1 的计数行已经用黄字标了, 挂到卡头是噪音。
+    //   取法: 按与主徽标同源的优先级排成 iCand, 只有"主徽标正好等于 iCand[0]"时才挂
+    //     iCand[1]; 这样"全部嵌入 / 无图片 / 有链接图"三种 ok~轻状态永远不会多出一颗。
+    var iCand = [];
+    if (missN > 0) iCand.push("缺失 " + missN + " 张");
+    if (lowN > 0) iCand.push("偏低 " + lowN + " 张");
+    if (rsIncomplete) iCand.push("未完成");
+    var iChip2 = (iCand.length > 1 && iCand[0] === iChip) ? chip("warn", iCand[1]) : "";
+    // 一张图都没有: 与卡②「无隐藏图层、隐藏对象。」同一形态, 不摆空行 (v11.67 ok 态统一)
     if (embN === 0 && linkedN === 0 && rs.total === 0 && !rsIncomplete) {
-      iHtml = '文档<b class="good">无图片</b>。';
+      iHtml = '无图片。';
     } else {
       // 段 1 的标题行用 .ink-block（不是 .row-head）—— 两个理由:
       //   ① 它是卡体首元素, CSS 的 `.card-body > :first-child{margin-top:0}` 会吃掉
@@ -1704,7 +1735,7 @@
     }
     // v11.63: 卡头不再挂定位按钮 —— 两段各有一颗块内按钮(4 = 链接图 / 5 = 低清图),
     //   卡头再挂一颗只会让人分不清它选的是哪一边。
-    return scanCk[3] ? card("图片", iLevel, iChip, iHtml, null, "", 0) : "";
+    return scanCk[3] ? card("图片", iLevel, iChip, iHtml, null, iChip2, 0) : "";
   }
 
   function renderCardInkStroke(d, scanCk) {
@@ -1712,7 +1743,8 @@
     var bt = d.black.text, bp = d.black.path;
     var bHtml = "";
     var bLevel = "ok";
-    var bChip = "通过";
+    // v11.66(P2): 初值同无异常分支 —— "通过" 这个说法只在这张卡出现过, 与「无叠印/无未使用」不搭
+    var bChip = "无异常";
     var totalBad = bt.bad + bp.bad;
     var totalWarn = bt.warn + bp.warn;
     var light = d.black.light || { count: 0, samples: [] };
@@ -1800,15 +1832,37 @@
     blocks += '<div class="ink-rest">' + rest + "</div>";
     bHtml = blocks;
 
-    // 徽标: 主徽标只管"油墨总量 + 描边<0.1mm + 色版1~4%"(描边/色版并入"注意 N 处"黄标)
-    var totalWarnAll = totalWarn + thinN + lightN;
-    if (totalBad > 0) { bLevel = "bad"; bChip = "超标 " + totalBad + " 处"; }
-    else if (totalWarnAll > 0) { bLevel = "warn"; bChip = "注意 " + totalWarnAll + " 处"; }
+    // 徽标: v11.66(雪糕选 B / P4) 换成"主 + 次"两段式, 与图片卡同一口径。
+    //   旧口径是一条互斥链: 有超标就只报"超标 N 处", 否则把 偏重/描边细/色版浅 三类
+    //   **加成一个数**报"注意 N 处" —— 既看不出是哪一类, 超标时偏重也会被整段盖掉。
+    //   新口径: 按 超标 > 偏重 > 描边细 > 色版浅 排成候选, 主徽标取第一位(最严重),
+    //   次徽标取第二位(下一个能下手处理的), 每颗都带自己的类别名。
+    //   ⚠ 候选只 push 上面四种; RGB/专色/混合色 仍只出现在灰色汇总行 —— 它们不属于
+    //     "油墨总量/描边/色版" 这三类可下手的问题(要不要计入得单独拍板)。
+    var bCand = [];
+    if (totalBad > 0) bCand.push(["bad", "超标 " + totalBad + " 处"]);
+    if (totalWarn > 0) bCand.push(["warn", "偏重 " + totalWarn + " 处"]);
+    if (thinN > 0) bCand.push(["warn", "描边细 " + thinN + " 处"]);
+    if (lightN > 0) bCand.push(["warn", "色版浅 " + lightN + " 处"]);
+    if (bCand.length === 0) {
+      // v11.66(P2): "通过" 太笼统, 与「无叠印 / 无未使用」这一族不搭 ⇒ 改「无异常」
+      bChip = "无异常";
+      // v11.67(雪糕选 C): 干净时补一句 ok 结论, 与其余五张卡同形「无 X。」。
+      //   ⚠ 只加这一句, 不动下面的灰色汇总行(.ink-rest) —— 那行在**有问题时也在**
+      //     (内容是"正常 N · RGB N · 专色 N"), 调亮它会在有问题的卡里跟真结论抢注意力。
+      bHtml = '无异常。' + bHtml;
+    } else {
+      bLevel = bCand[0][0];
+      bChip = bCand[0][1];
+    }
+    var bChip2 = bCand.length > 1 ? chip(bCand[1][0], bCand[1][1]) : "";
     // v9.4: 叠印已独立成卡(下一张),这里不再挂 extraChip,标题也去掉"叠印"二字
     // v11.53: 卡头按钮撤掉 —— 雪糕要的是"每块各一颗"(见 inkBlock 的第 5 参),
     //   卡头这颗选的是四块并集, 与块内按钮语义重复且更容易"一锅端"。
     //   ⇒ 第 7 参一律传 0(bt114 守住移除, 别又加回来)。
-    return scanCk[4] ? card("油墨", bLevel, bChip, bHtml, null, "", 0) : "";
+    // v11.64(雪糕): 卡名带后缀 —— 这张卡管三类事(油墨总量/色版/描边), 光写"油墨"看不出描边。
+    // v11.66: 第 6 参由空串改为 bChip2(次徽标)。
+    return scanCk[4] ? card("油墨 · 描边", bLevel, bChip, bHtml, null, bChip2, 0) : "";
   }
 
   function renderCardOverprint(d, scanCk) {
@@ -1841,7 +1895,7 @@
       //   "叠印 N 处" + 副徽标"白叠印 N 处" 两枚太长 ⇒ "叠印 N · 白 N" 一枚。
       //   危害说明不丢: 卡内汇总行"白色 N"仍带 title 悬停提示。
       // v10.36: 截断时数字加 "+" —— "叠印 8+" 一眼看出"不止这些"。
-      oChip = "叠印 " + ovpN + (ovpTrunc ? "+" : "") + (ovpW > 0 ? " · 白 " + ovpW : "");
+      oChip = "叠印 " + ovpN + (ovpTrunc ? "+" : "") + (ovpW > 0 ? " · 白叠印 " + ovpW : "");
       var oRows = (ovp.samples || []).map(function (s) {
         return { l: s.src === "text" ? "文字" : "图形", s: s };
       });
@@ -1876,7 +1930,7 @@
       oHtml = '已检查范围内<b class="warn-t">无叠印</b>，但已达检查上限，结果不完整。' +
         '<br><span class="dim">文档对象数超过本次检查配额，可能有叠印未被检查到。</span>';
     } else {
-      oHtml = '文档<b class="good">无叠印</b>。';
+      oHtml = '无叠印。';
     }
     // v9.5: 如实标注检查范围 —— 隐藏对象 / 图层不进叠印统计(读它们得先显示, 而检查是只读的)
     // v9.7: 删掉独立的「其中锁定对象 N 处…」灰字行 —— 锁定处数已并入上方标题行,
@@ -1929,7 +1983,7 @@
       tHtml = '已检查范围内<b class="warn-t">无叠印</b>，但已达检查上限，结果不完整。' +
         '<br><span class="dim">文档对象数超过本次检查配额，可能有叠印未被检查到。</span>';
     } else {
-      tHtml = '文档<b class="good">无叠印</b>。';
+      tHtml = '无叠印。';
     }
     tHtml += '<div class="dim">隐藏对象与图层不参与叠印检查。</div>';
 
@@ -2036,7 +2090,11 @@
     //   ⇒ **绿色徽标配"未检查"三个字**, 与正文自相矛盾。这正是 v10.46 审查 P2-3 给卡⑧
     //   修过的同一个坑(卡⑧已改为回落 sLevel, 卡⑨ v11.16 才加, 漏跟)。
     //   现在徽标级别独立三态: 未检查黄 / 有命中红 / 正常绿 —— 与卡⑧、卡⑤ 口径一致。
-    var cHtml = "", cLevel = "ok", cChip = "无", cChipLevel = "ok", nAll = 0;
+    // v11.66(P1/P2/P5): 三项一起改 ——
+    //   ① "3 个" -> "可清理 3 个"(原写法数字打头, 看不出这 3 个是什么);
+    //   ② ok 态 "无" -> "无需清理"(与"无叠印/无未使用"同一族);
+    //   ③ 卡片级由 warn 升 bad, 与红色徽标对齐(原先黄条配红标)。
+    var cHtml = "", cLevel = "ok", cChip = "无需清理", cChipLevel = "ok", nAll = 0;
     if (cl) {
       var nStray = (cl.stray && cl.stray.count) || 0;
       var nUnp = (cl.unpainted && cl.unpainted.count) || 0;
@@ -2047,9 +2105,9 @@
       var cLck = ((cl.stray && cl.stray.locked) || 0) + ((cl.unpainted && cl.unpainted.locked) || 0) +
                  ((cl.emptyText && cl.emptyText.locked) || 0);
       if (nAll === 0) {
-        cHtml = '无 <b class="white">游离点、未上色对象、空文本</b>。';
+        cHtml = '无游离点、未上色对象、空文本。';
       } else {
-        cLevel = "warn"; cChip = nAll + " 个"; cChipLevel = "bad";
+        cLevel = "bad"; cChip = "可清理 " + nAll + " 个"; cChipLevel = "bad";
         cHtml = '<div>游离点 <b class="warn-t">' + nStray + "</b> 个 · 未上色对象 <b class=\"warn-t\">" +
           nUnp + "</b> 个 · 空文本 <b class=\"warn-t\">" + nTxt + "</b> 个。</div>";
         if ((cl.spaceOnly || 0) > 0) {

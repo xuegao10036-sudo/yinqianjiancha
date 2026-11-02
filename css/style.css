@@ -470,7 +470,18 @@ label.chk input[type="checkbox"] {
   font-weight: 600;
   font-size: 14px;
 }
-.card-head .chips { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 0; }
+/* v11.66(雪糕选 B / P6): 卡头放不下时的兜底 —— 只改"能不能收", 不动任何间距数值。
+   ① .chips 由 flex-shrink:0 改为 1 + min-width:0: 允许徽标这一块**收缩**;
+   ② 每颗 .chip 加 min-width:0 + overflow:hidden + text-overflow:ellipsis:
+      收缩时文字走省略号, 而不是整颗被卡片右边缘裁掉。
+   ⚠ 收紧前是"标题先被压到 0、徽标硬顶着溢出、最右那颗被 .card 的 overflow:hidden 切掉"
+     —— 字体卡拖到 300px 以下时第三颗等于消失。现在改成"标题优先保住、徽标各自收一点、
+     超长的出省略号", 信息不再凭空少一颗。
+   ⚠ 间距一个数都没动(gap 仍 6px、内距仍 2px 10px) —— v11.28 定的 6 档白名单
+     (2/6/8/10/15/20) 不许破, 4px 与 7px 都进不去。
+   ⚠ 上下内距与边框不动 ⇒ 徽标高仍 21、卡头仍 37px。 */
+.card-head .chips { display: inline-flex; align-items: center; gap: 6px; flex-shrink: 1; min-width: 0; }
+.card-head .chips > .chip { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* v11.41: 卡头定位按钮。几何约束: 21×21 与 .chip 同高(11px 行 + 2×2 内距 + 2×1 边框)
    ⇒ 卡头内容高仍是 21, .card-head 恒 37px, 九卡零位移。
    ⚠ 不要再往上加 margin/padding —— 一旦超过 21 就会把卡头顶开。
@@ -490,8 +501,11 @@ label.chk input[type="checkbox"] {
   color: #9c9c9c;
   cursor: pointer;
 }
-.card-locate:hover { color: #ffffff; background: #2c2c2e; }
-.card-locate:active { background: #3a3a3a; }
+/* v11.65(雪糕): "去掉鼠标放上去会显示底部的圆圈" —— hover 不再铺背景色, 只提亮图标。
+   ⚠ :active 同款改掉: 它原本也是"一圈深灰底", 与 hover 的圆圈是同一个观感问题。
+   ⚠ 按钮盒子(21×21)与其中的 svg 尺寸无关 —— 去掉背景不影响卡头 37px。 */
+.card-locate:hover { color: #ffffff; }
+.card-locate:active { color: #ffffff; }
 .card-locate svg { pointer-events: none; }
 /* v11.53: 卡⑥ 每块标题行内的小定位按钮(雪糕: "放到我框起来的地方, 每个选择是选当前的内容")。
    跟在"N 处"后面, 不是行尾 —— 行尾 .row-h 是样本截断提示, 两样东西各占一头。
@@ -518,8 +532,9 @@ label.chk input[type="checkbox"] {
   cursor: pointer;
   vertical-align: 0;
 }
-.ink-loc:hover { color: #ffffff; background: #2c2c2e; }
-.ink-loc:active { background: #3a3a3a; }
+/* v11.65(雪糕): 同 .card-locate —— hover 只提亮, 不铺圆圈底色。 */
+.ink-loc:hover { color: #ffffff; }
+.ink-loc:active { color: #ffffff; }
 .ink-loc svg { pointer-events: none; }
 /* v11.54: 卡⑥ 块标题行 —— 标题让位、省略号收尾(与卡头标题同一套降级)。
    起因: 块内按钮占 22px, 实测面板宽 ≤280px 时「油墨总量220~300」标题折成两行
@@ -613,8 +628,10 @@ table.kv td:first-child { color: #b6b6b6; white-space: nowrap; width: 40%; }
 .dim { color: #b6b6b6; }
 /* v5.4: 正文达标/正常文案统一白色(原绿高亮);徽标/成功提示条仍保留绿色 */
 .good { color: #eeeeee; }
-/* v5.3: 达标/正常文案用白色(不再绿高亮) */
-.white { color: #eeeeee; }
+/* v11.67(雪糕选 C): 删掉 .white —— 它与 .good 完全同值(#eeeeee / 无 font-weight),
+   是 v5.3 与 v5.4 两次改色留下的两个名字, main.js 里已全部并入 .good。
+   ⚠ 别再为了"语义更直白"新加一个同值类: 两个名字并存时, 改色只会改到其中一个,
+     于是同一面板里出现两种白(这正是本轮要收的坑)。 */
 .warn-t { color: #e8b93e; }
 .bad-t { color: #f06a55; }
 /* v10.2 收尾: 补上这条 —— main.js 的「缺失链接」⚠ 用了 .warn-tri, 但 CSS 里从来没有它

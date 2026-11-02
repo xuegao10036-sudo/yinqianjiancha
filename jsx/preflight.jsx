@@ -72,7 +72,7 @@ function pfStringify(value) {
 //   __pfUsedCache 两处失效点(进 pfClearUnusedSwatches 即清 + pfClearUnusedGradPattern 读完即清)
 // v11.0: 版本号跃升至 11.0(从 10.60 起进入 11.x 线; 代码内容与 v10.60 一致, 仅版本标识变更)
 // v11.2: 全站胶囊按钮统一 40px 高(纯面板 CSS 改动, ExtendScript 逻辑零变化), 仅同步版本号
-var PF_BUILD = "11.63";
+var PF_BUILD = "11.68";
 
 // v10.46(审查 P2-1): 颜色收集的**轮内**复用缓存。
 //   onClearSwatches 用 execActionMulti 串联 pfClearUnusedSwatches + pfClearUnusedGradPattern,
