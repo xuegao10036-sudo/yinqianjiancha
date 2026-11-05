@@ -8,14 +8,17 @@
   //   run() 超时后补一枚宽限计时器兜底解锁 scanBusy(防 jsx 挂死锁面板)
   // v11.0: 版本号跃升至 11.0(代码内容与 v10.60 一致, 仅版本标识变更)
   // v11.2: 全站胶囊按钮统一 40px 高(CSS 改动, 前端逻辑无变化), 版本链同步
-  var JS_BUILD = "20261102-2";
+  var JS_BUILD = "20261105-6";
   // 必须与 jsx/preflight.jsx 里的 PF_BUILD 保持一致。
   // JSX 每次返回都会带上它的构建号,前端据此判断 ExtendScript 引擎里
   // 加载的是不是当前版本 —— 不一致就强制 $.evalFile 重载(见 execJsx)。
-  var JSX_BUILD = "11.68";
+  var JSX_BUILD = "11.80";
   // v10.2 收尾: 「耗时较长」提示阈值 —— 原先 20000 在 run() 与 execAction() 各写一遍,
   //   连提示语里的「20 秒」也是手写 ⇒ 改口径要动 3 处、漏一处就文案与行为不一致。收成一处。
   var BUSY_TIMEOUT_MS = 20000;
+  // v11.75(雪糕选 A): 卡片展开态存档键。按卡名记(不用序号) —— 卡片顺序可拖动排序,
+  //   序号会漂; 卡名在八卡里唯一且不受排序影响。
+  var PF_EXPAND_KEY = "pf_expandCards";
 
   // 全局错误捕获: 把任何未捕获异常显示到面板,便于定位"空白"问题
   window.onerror = function (msg, url, line, col) {
@@ -446,13 +449,16 @@
     if (TH_DEF && TH_DEF[k] !== undefined && TH_DEF[k] !== null) return TH_DEF[k];
     return "?";
   }
-  // v11.39(审查 #23): 截断提示的唯一出口 —— thv("cap") 在默认值还没到手时返回 "?"，
-  //   原实现逐处字符串拼接会渲染出「仅列出前 ? 处」。这里判一次数, 拿不到就整句不显示
-  //   (没有数字的截断提示没有意义, 不如不写)。
+  // v11.79(雪糕): 标题行右侧「仅列出前 5 个」这类样本上限提示整体停用 ——
+  //   展开箭头上线后名单能全部展开, 这行提示纯属重复。
+  //   ⚠ 保留函数与 8 个调用点的形态(恒返回空串), 不动 rowHead / inkBlock 的渲染结构:
+  //     那些结构仍被 ink-align / sample-caps 的几何断言钉着, 改结构的收益不抵风险。
+  //   ⚠ 带括号的独立灰字行 (仅列出前 3000 个) 是扫描配额警告, 数据根本没生成、
+  //     展开也补不出来; 删掉会把不完整结果伪装成完整结果, 必须保留。
+  //   (v11.39 原实现会渲染「仅列出前 ? 处」, 那是 thv("cap") 拿不到默认值时的问题,
+  //    现在整句不再输出, 该问题自然消失。)
   function capHint(unit) {
-    var c = thv("cap");
-    return (typeof c === "number" && isFinite(c) && c > 0)
-      ? ("仅列出前 " + c + " " + unit) : "";
+    return "";
   }
 
   // 取"当前生效阈值": 已有默认值则直接算; 否则问 jsx 要一次默认值(只回默认, 不扫描文档)
@@ -1157,7 +1163,7 @@
   //   会被一起裁掉。挪出来之后: .row-t 可缩可省略, 按钮恒 16px 不被裁,
   //   .row-h 仍靠 margin-left:auto 贴右。间距由 .ink-block 的 gap:8px 提供。
   // v11.61(雪糕选 B): 量词 处 -> 个。这几块数的是**图形/对象**, 中文里"个"才对;
-  //   "处"留给"位置数"(文本溢出、字号线、叠印这类按落点数的地方)。
+  //   "处"留给"位置数"(叠印、字号线这类按落点数的地方)。
   //   所以下面四处的 capHint 也一并 处 -> 个, 否则标题说"3 个"、右边提示却说"仅列出前 20 处"。
   function inkBlock(name, n, lvl, hint, sub) {
     return '<div class="ink-block"><span class="row-t">' + esc(name) + ' <b class="' +
@@ -1220,11 +1226,13 @@
       if (ta === tb) return 0;
       return tb - ta;
     });
-    var use = (cap && order.length > cap) ? order.slice(0, cap) : order;
+    // v11.75(雪糕选 A): 输出全部组, 第 cap+1 组起由 pfExpandHtml 加 hidden 折叠;
+    //   shown 仍只累计默认可见的前 cap 组 —— 截断提示的判断口径不能跟着变。
+    var use = order;
     var out = '<ul class="' + (tbl ? "ink-tbl" : "list") + '">', shown = 0;   // v11.24: 油墨卡用表格, 叠印卡保持 list
     for (i = 0; i < use.length; i++) {
       g = map[use[i]];
-      shown += g.n;
+      if (!cap || i < cap) shown += g.n;
       out += inkLi(g.l, g.s, g.ml, g.n);   // v11.39(审查 #22): 第 5 参 tbl 已删(那一支不可达)
     }
     out += "</ul>";
@@ -1232,6 +1240,110 @@
   }
 
   // ---------- 渲染 ----------
+  // ---------- v11.75(雪糕选 A): 样本名单「默认 5 条 + 卡内展开全部」 ----------
+  // v11.76(雪糕选 B): 展开控件从「独占一行的文字按钮」改成标题行折角箭头, 零新增行高。
+  // v11.77(雪糕改选 C): 箭头从标题行最左挪到最右(与卡内定位三角错开)。
+  //   仍用 B 的「标题行注入 SVG」, 不退回方案页 C 的负外边距 + 伪元素硬提回上一行:
+  //   ⚠ 不能靠 .row-t 撑开: .ink-block .row-t 是 flex:0 1 auto, 不吃剩余宽度;
+  //     也不能靠 float: flex item 上 float 被忽略, 普通 div 里 float 箭头还会掉出行盒。
+  //   ⇒ 标题行统一 flex, 箭头 margin-left:auto 吃剩余宽度; 已有 .row-h(截断提示,
+  //     自带 margin-left:auto)的行改挂 pf-exp-after-h, 免得两个 auto 平分空间。
+  //   整行标题就是控件, 零新增行高。字体卡的「未转曲文本框 N 个」本来就是标题行,
+  //   不许再补「样本名单」之类的占位行。
+  // jsx 侧名单采集上限已提到 PF_SAMPLE_MAX(软封顶), 这里**只管显示**:
+  //   · 每个 ul.list / ul.ink-tbl 的第 cap+1 条起加 hidden + data-pf-x, 默认折叠;
+  //   · 有折叠行的名单, 把箭头注入它**紧邻的标题行 div** 内部末尾(</div> 之前);
+  //   · 展开用 JS 直接移除 hidden 属性, 不切 class、不重绘、不重发跨桥。
+  // ⚠ 这是**字符串级**后处理: 预览沙箱没有真 DOM, 但它也要拿到增强后的 HTML。
+  //   两步走: ① 先折叠所有 ul(不管有没有标题行, 名单都能收); ② 再给有折叠行的
+  //   名单配对标题行并注入箭头。标题行限定为不含嵌套 div 的最内层行, 免得从
+  //   .card 开头一路吞到名单。
+  // ⚠ v11.79: capHint 已停用、row-h 不再渲染; inkRows 的截断计数口径仍一个字不改。
+  var PF_EXPAND_ARROW =
+    '<button type="button" class="pf-exp-arrow" data-pf-expand="1" ' +
+    'title="展开全部" aria-label="展开全部">' +
+    '<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" ' +
+    'stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<polyline points="3,1 7,5 3,9"/></svg></button>';
+  function pfDefaultShow() {
+    var c = thv("cap");
+    return (typeof c === "number" && isFinite(c) && c > 0) ? c : 5;
+  }
+  function pfExpandHtml(html) {
+    var cap = pfDefaultShow();
+    var src = String(html).replace(/<ul class="(?:list|ink-tbl)"[^>]*>[\s\S]*?<\/ul>/g, function (block) {
+      var n = 0;
+      var out = block.replace(/<li\b/g, function (tag) {
+        n++;
+        return n > cap ? '<li hidden data-pf-x' : tag;
+      });
+      if (n <= cap) return out;
+      return out.replace(/^<ul class="([^"]*)"/, '<ul class="$1 pf-has-more"');
+    });
+    return src.replace(
+      /(<div(?:\s[^>]*)?>(?:(?!<\/?div)[\s\S])*?<\/div>)\s*(<ul class="[^"]*pf-has-more[^"]*"[^>]*>)/g,
+      function (m, head, ulOpen) {
+        var out = head.replace(/<\/div>$/, PF_EXPAND_ARROW + "</div>") + ulOpen;
+        // 有截断提示时 .row-h 自己带 margin-left:auto, 箭头不能再抢 auto(会平分空间
+        //   把提示挤到行中间); 改成只跟 6px, 让「提示 + 箭头」一起被推到右侧。
+        return /class="row-h"/.test(head)
+          ? out.replace('class="pf-exp-arrow"', 'class="pf-exp-arrow pf-exp-after-h"')
+          : out;
+      });
+  }
+  function pfCardKey(card) {
+    var h = card.querySelector ? card.querySelector(".card-head > span:first-child") : null;
+    return h ? String(h.textContent || "") : "";
+  }
+  function pfSetCardOpen(card, open) {
+    var rows = card.querySelectorAll ? card.querySelectorAll("[data-pf-x]") : [];
+    var i;
+    for (i = 0; i < rows.length; i++) {
+      if (open) rows[i].removeAttribute("hidden"); else rows[i].setAttribute("hidden", "");
+    }
+    if (card.classList) {
+      if (open) card.classList.add("pf-expanded"); else card.classList.remove("pf-expanded");
+    }
+    // v11.75: 一张卡可能有多段名单(如图片卡的链接图 / 低清图), 每段前各有一枚按钮,
+    //   必须整卡一起改文案, 否则只有第一枚变「收起」, 其余仍写「展开全部」会误导。
+    // v11.76(B): 控件里是 SVG, 写 textContent 会把图标冲掉 —— 只换悬停/无障碍文案。
+    var btns = card.querySelectorAll ? card.querySelectorAll("[data-pf-expand]") : [], b;
+    for (b = 0; b < btns.length; b++) {
+      btns[b].setAttribute("title", open ? "收起" : "展开全部");
+      btns[b].setAttribute("aria-label", open ? "收起" : "展开全部");
+    }
+    // v11.79: 样本上限提示整体停用 ⇒ 不再有 .row-h, 展开态也不再改「已显示全部」。
+  }
+  function pfSaveExpanded() {
+    try {
+      var cards = document.querySelectorAll ? document.querySelectorAll(".card.pf-expanded") : [], keys = [], i;
+      for (i = 0; i < cards.length; i++) {
+        var k = pfCardKey(cards[i]);
+        if (k) keys.push(k);
+      }
+      localStorage.setItem(PF_EXPAND_KEY, keys.join("\u0001"));
+    } catch (e) {}
+  }
+  function pfRestoreExpanded() {
+    try {
+      var saved = String(localStorage.getItem(PF_EXPAND_KEY) || "");
+      if (!saved) return;
+      var set = {}, parts = saved.split("\u0001"), i;
+      for (i = 0; i < parts.length; i++) set[parts[i]] = 1;
+      var cards = document.querySelectorAll ? document.querySelectorAll(".card") : [], j2;
+      for (j2 = 0; j2 < cards.length; j2++) {
+        if (set[pfCardKey(cards[j2])]) pfSetCardOpen(cards[j2], true);
+      }
+    } catch (e) {}   // 预览沙箱没有 querySelectorAll 时静默跳过, 不能让它带崩整次 render
+  }
+  function onExpandToggle(btn) {
+    var card = btn.parentNode;
+    while (card && !(card.classList && card.classList.contains("card"))) card = card.parentNode;
+    if (!card) return;
+    pfSetCardOpen(card, !card.classList.contains("pf-expanded"));
+    pfSaveExpanded();
+  }
+
   function render(d) {
     lastDocKey = docKey(d); // v5.6: 记录文档指纹,供焦点切换比对
     // v10.1: 阈值随结果一起回传(jsx 的 PF_TH_DEF 是唯一真源) —— 面板只显示, 不保存默认值。
@@ -1289,7 +1401,8 @@
     //   ⚠ 只影响渲染顺序; 传给 jsx 的卡开关仍按固定卡序(ckArgs()+swArg()), 否则 c1..c9 会错位。
     var html = "", _oi;
     for (_oi = 0; _oi < CARD_ORDER.length; _oi++) html += (cards[CARD_ORDER[_oi]] || "");
-    $("results").innerHTML = html;
+    $("results").innerHTML = pfExpandHtml(html);
+    pfRestoreExpanded();   // v11.75: 重绘后按存档恢复各卡展开态
     // v10.42: 新内容已就位 ⇒ 撤掉占位高度(此后高度由真实内容决定; 滚动位置全程未被夹动)
     releaseHeight($("results"));
     releaseHeight($("foot"));
@@ -1490,19 +1603,22 @@
       // v11.61(雪糕选 B「名词打头」): "26 个未转曲文本框" -> "未转曲文本框 26 个"。
       //   全站口径: 行标题/徽标一律 **名词在前、数字在后**, 与"缺失字体 2 个""隐藏图层 3 个"
       //   同一形态; 叙述句(如"另有 3 个隐藏文字未转曲")不动 —— 那是中文自然语序, 硬倒装反而不通。
-      var parts = '未转曲文本框 <b class="warn-t">' + d.fonts.totalText + "</b> 个";
+      // v11.76(B): 包成一行 div, 让 pfExpandHtml 能把箭头注入这一行。
+      // v11.77(C): 箭头改落这一行最右侧, 文字仍在最左, 不补占位行。
+      //   pf-exp-head 让这行变 flex(其它标题行本来就是 flex), 箭头才能 margin-left:auto 贴右。
+      //   原来它是 card-body 里的裸文本(承载不了按钮); 包 div 后仍独占一行, 视觉零变化。
+      var parts = '<div class="pf-exp-head">未转曲文本框 <b class="warn-t">' + d.fonts.totalText + "</b> 个</div>";
       if (d.fonts.names.length) {
         // v5.0: 字体名可能超长(罕见),同样单行截断+title 悬停看全名
-        // v5.6/F4: 字体种类封顶,超出折叠为"等 N 种"(多字体文档不再拉长卡片)
-        // v5.19: 封顶 15→8
-        var shown = d.fonts.names.slice(0, 8);
-        var extra = d.fonts.names.length - shown.length;
+        // v11.75(雪糕选 A): 原 v5.19 的 8 条硬截断是「前端第二道截断」——
+        //   jsx 侧名单已多收, 到这里又被砍回去 ⇒ 卡内「展开全部」永远展不满。
+        //   现在全量交给 pfExpandHtml 折叠(默认 5 行), 不再另设上限 / 不再有"等 N 种"。
         // v11.62(雪糕): 去掉 "，字体:" 这个子标签 —— "未转曲文本框 26 个，字体:" -> 直接跟名单。
         //   卡名「字体 · 转曲」已经交代了这份名单是什么, 多一个"字体:"只是把一句标题切成两截。
-        parts += '<ul class="list">' + shown.map(function (n) {
+        parts += '<ul class="list">' + d.fonts.names.map(function (n) {
           var full = decodeImgName(n);
           return '<li class="trunc" title="' + esc(full) + '">' + esc(truncName(full, 34)) + "</li>";
-        }).join("") + (extra > 0 ? '<li class="dim">…等 ' + extra + " 种</li>" : "") + "</ul>";
+        }).join("") + "</ul>";
       }
       if (hasMissing) parts += renderMissingFonts(missingFonts);
       fHtml = parts;
@@ -1514,27 +1630,9 @@
     if (mixF > 0) fHtml += '<div class="dim">另有 <b class="warn-t">' + mixF +
       '</b> 个文本框含多种字体(或字体名读不出)，未参与缺失字体检测。</div>';
 
-    // v11.60(雪糕): 文本溢出(Overset) —— 卡内独立一块。
-    //   ⚠ 有意**不占卡头徽标**: 卡③ 卡头现在已有 3 颗徽标 + 定位按钮, 实测占 253.9px
-    //     (可用宽 300px, 标题已被挤到只剩 46px)。再加第 4 颗会连徽标本身都溢出卡头。
-    //     而且"溢出的一定还是文本框" ⇒ 必然同时命中"未转曲", 卡头照样标红、卡照样会被点开。
-    var ovs = (d.overset && d.overset.count > 0) ? d.overset : null;
-    if (ovs) {
-      var ovHint = (ovs.count > ovs.samples.length) ? capHint("处") : "";
-      // v11.61(雪糕选 B): "2 处文本溢出:" -> "文本溢出 2 处"(名词打头)
-      // v11.62: 尾冒号一并去掉(卡片正文无冒号)
-      // v11.63(雪糕): 去掉块尾那句说明 —— "溢出的文字在画布上根本没排出来，转曲也找不回来
-      //   —— 先调文本框或字号。"。卡里已经有"N 处文本溢出"和两份样本, 结论用户自己看得懂;
-      //   这类"解释危害 + 教你怎么做"的灰字属于噪音, 逐条清掉(见同日 说明文字清理清单)。
-      fHtml += rowHead('文本溢出 <b class="bad-t">' + ovs.count + "</b> 处", ovHint) +
-        '<ul class="list">' + ovs.samples.map(function (s) {
-          return '<li class="kv2" title="' + esc(s.t) + "  " + esc(s.k) + '">' +
-            '<span class="nm">' + esc(s.t) + '</span>' +
-            '<span class="vl">' + esc(s.k) + "</span></li>";
-        }).join("") + "</ul>";
-      if (ovs.truncated) fHtml += '<div class="dim">(仅列出前 ' + thv("scan") + " 个)</div>";
-      fLevel = "bad";
-    }
+    // v11.73(雪糕): 文本溢出块已整体删除 —— "还是不行，检测不出来，彻底删掉这个功能吧"。
+    //   卡③ 从此不再有这一块, 也不再读 d.overset。理由与善后见 preflight.jsx 顶部说明。
+    //   ⚠ 别再在卡头补"溢出"徽标: 卡③ 三颗徽标 + 定位按钮实测已占 253.9px(可用宽 300px)。
 
     // v5.15: 极小字号,并入字体卡底部
     // v10.2: 合并为一档 —— 只有"小于阈值"这一条判定, 且直接标红(原先 <6 黄 / <5 红两级)。
@@ -1564,7 +1662,7 @@
             '<span class="nm">' + esc(s.t) + '</span>' +
             '<span class="vl">' + s.pt + " pt</span></li>";
         }).join("") + "</ul>";
-      // v11.66(P1): 补量词 —— "小字号 3" -> "小字号 3 处"(与"文本溢出 2 处"同词)
+      // v11.66(P1): 补量词 —— "小字号 3" -> "小字号 3 处"(与"叠印 2 处"同词)
       tinyChip = chip("bad", "小字号 " + tiny.count + " 处");
       fLevel = "bad";
     }
@@ -1650,15 +1748,31 @@
     }
     // v11.64(雪糕选 B): 卡头补一颗**次徽标** —— 主徽标仍只报"最严重一档", 但叠加时
     //   (比如既有缺失又有低清)光一颗看不出还有别的活儿要干。
-    //   口径: 次徽标只报"能下手处理"的那两类(偏低 / 结果不完整), **不报"有链接图"**
+    //   口径: 次徽标报"能下手处理"的那两类(偏低 / 结果不完整), **不报"有链接图"**
     //     —— 有链接是常态, 段 1 的计数行已经用黄字标了, 挂到卡头是噪音。
-    //   取法: 按与主徽标同源的优先级排成 iCand, 只有"主徽标正好等于 iCand[0]"时才挂
-    //     iCand[1]; 这样"全部嵌入 / 无图片 / 有链接图"三种 ok~轻状态永远不会多出一颗。
+    //   取法: 按与主徽标同源的优先级排成 iCand, 只有"主徽标正好等于候选第一位"时才挂
+    //     第二位; 这样"全部嵌入 / 无图片 / 有链接图"三种 ok~轻状态永远不会多出一颗。
+    // v11.69(雪糕): "如果图片全部嵌入应该显示全部嵌入这种的文案, 现在只会显示偏低 3 张"。
+    //   根因是 v11.63 合并两卡把「嵌入状态」与「分辨率状态」压进了同一条优先级链 ——
+    //   "全部嵌入"只是 iChip 的初值, 前面任何一档成立它就永远不出现。于是
+    //   「3 张全嵌入 + 3 张都低清」卡头只剩「偏低 3 张」, 而"图都在文件里"这个安全信号消失。
+    //   ⇒ 维度补位: 嵌入维度已干净(无缺失、无链接、有嵌入)时, 追加一颗**绿**徽标
+    //     「全部嵌入」作为末位候选。它排在"未完成"之后 —— 过程状态(检查没跑完)比已完成
+    //     状态更该被看到, 所以只有"偏低 + 未完成 + 全嵌入"三态叠加时它才让位(罕见, 接受)。
+    //   ⚠ 候选从字符串改成 {t,lv} 对象: 次徽标不再是清一色 warn, "全部嵌入"必须是绿。
+    // v11.70(雪糕): "全部嵌入、全部达标 这个状态改成 2 个徽标吧" ——
+    //   既然"另一个维度已干净"可以占次位, 分辨率维度的干净状态也该有个名字。
+    //   `全部达标` = 分辨率维度全清(有图、无低清、无读不出、未截断), 与 `全部嵌入` 对等。
+    //   ⚠ 条件里要带 missN === 0: 缺了源文件的那张根本量不出 ppi, 这时说"全部达标"
+    //     与同屏的「缺失 N 张」自相矛盾。带上它之后, 有缺失时这颗绿徽标永不出现。
     var iCand = [];
-    if (missN > 0) iCand.push("缺失 " + missN + " 张");
-    if (lowN > 0) iCand.push("偏低 " + lowN + " 张");
-    if (rsIncomplete) iCand.push("未完成");
-    var iChip2 = (iCand.length > 1 && iCand[0] === iChip) ? chip("warn", iCand[1]) : "";
+    if (missN > 0) iCand.push({ t: "缺失 " + missN + " 张", lv: "bad" });
+    if (lowN > 0) iCand.push({ t: "偏低 " + lowN + " 张", lv: "warn" });
+    if (rsIncomplete) iCand.push({ t: "未完成", lv: "warn" });
+    if (missN === 0 && linkedN === 0 && embN > 0) iCand.push({ t: "全部嵌入", lv: "ok" });
+    if (missN === 0 && rs.total > 0 && lowN === 0 && !rsIncomplete) iCand.push({ t: "全部达标", lv: "ok" });
+    // ⚠ 比较点必须写 .t —— 候选改成对象之后, 写 iCand[0] === iChip 恒为假, 次徽标会整片消失。
+    var iChip2 = (iCand.length > 1 && iCand[0].t === iChip) ? chip(iCand[1].lv, iCand[1].t) : "";
     // 一张图都没有: 与卡②「无隐藏图层、隐藏对象。」同一形态, 不摆空行 (v11.67 ok 态统一)
     if (embN === 0 && linkedN === 0 && rs.total === 0 && !rsIncomplete) {
       iHtml = '无图片。';
@@ -2603,6 +2717,12 @@
   // 事件委托: 处理动态生成的按钮
   document.addEventListener("click", function (e) {
     var t = e.target;
+    // v11.78(雪糕真机: "最右边的按钮按下去没反应"): 展开箭头是纯 SVG 按钮,
+    //   点中 <svg>/<polyline> 时 e.target 不是 button; 且 data-pf-expand 曾是
+    //   **无值属性**, getAttribute 返回 "", 拿它当布尔恒假 ⇒ 从不触发。
+    //   ⇒ closest 向上找控件 + 判 !== null, 两条路都不依赖属性有没有值。
+    var expBtn = (t && t.closest) ? t.closest("[data-pf-expand]") : null;
+    if (!expBtn && t && t.getAttribute && t.getAttribute("data-pf-expand") !== null) expBtn = t;
     if (t && t.id === "btnOutline") onOutline();
     else if (t && t.id === "btnEmbed") onEmbed();
     else if (t && t.id === "btnOvpClear") onOvpClear();
@@ -2610,6 +2730,7 @@
     else if (t && t.id === "tBtnOvpApply") onOvpApply(); // v10.14: 分级版规则执行
     else if (t && t.id === "btnDelHidden") onDelHidden(); // v10.15: 卡② 删除隐藏对象
     else if (t && t.id === "btnCleanup") onCleanup(); // v11.16: 卡⑨ 一键清理
+    else if (expBtn) onExpandToggle(expBtn); // v11.78: SVG target + 无值属性都能命中
     // v11.41: 卡头定位按钮(五卡: 字体/嵌入/分辨率/叠印/清理) + v11.53 卡⑥ 块内按钮。
     //   ⚠ 按钮内是 <svg>, 点击时 e.target 可能是它或 <path> ——
     //   靠 CSS 的 pointer-events:none 让 target 恒落在 button 上; 这里仍按

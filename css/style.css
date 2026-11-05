@@ -16,15 +16,20 @@ body {
   background: #000;
   color: #eeeeee;
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: scroll;
   /* v10.45: 顶栏改 fixed 后, body 顶部留出等高占位, 否则首屏内容被顶栏盖住。
      61px = 无头实测 .topbar 高度(顶栏 flex 不换行 ⇒ 与面板宽度无关, 恒定值)。
      v11.2: 58 -> 61 —— 顶栏按钮统一 40px 高后(原 37), 顶栏 = 10 + 40 + 10 + 1px 底边线。
      ⚠ 两者必须成对改: 只改按钮不改这里 ⇒ 首屏被顶栏压住 3px。 */
   padding-top: 61px;
-  /* v10.11e: 恒定预留滚动条槽位 —— 点「开始检查」清空结果时页面变短、滚动条消失又回来,
-     视口宽度 10px 一伸一缩, sticky 顶栏(含按钮)跟着平移, 被感知为"按钮闪了一下"。
-     stable 让槽位始终占位, 视口宽度恒定, 顶栏不再回退。 */
+  /* v11.80(雪糕): 「开始检查」按下去后, 顶栏按钮会左移 10px。
+     根因: body 的滚动条按内容出现/消失 ⇒ 内容区宽 300/290, fixed 顶栏 right:0
+     跟着缩, 右侧按钮右缘从 x285 挪到 x275。
+     ⚠ v10.11e 加的 scrollbar-gutter: stable 与自定义 ::-webkit-scrollbar 并存时
+       **实测不生效**(2026-11-05 无头 Chrome 8 组 iframe 量测: 删掉它, 短/长两态
+       仍是 285/275)。保留它只作未来兼容, 不指望它防跳。
+     正解: overflow-y: scroll 让 10px 槽位常驻 ⇒ 短/长两态按钮右缘都恒为 275,
+     且与卡片右外沿(同样缩到 290 再留 15px)保持对齐。 */
   scrollbar-gutter: stable;
   user-select: text;
 }
@@ -643,7 +648,7 @@ table.kv td:first-child { color: #b6b6b6; white-space: nowrap; width: 40%; }
 ul.list { list-style: none; margin-top: 6px; }
 /* 清单样本行: 无底色块, 文字 #b6b6b6(配色 A 的"次要"档), 左缩进 10px。
    缩进用 padding-left(非 text-indent) —— 每行整体右移, 等宽字下 "=" 列对齐不受影响。
-   ⚠ 灰度必须弱于 .section-sub(#d6d6d6): 明细不能盖过结构标签(v10.3 定的次序)。
+   ⚠ 灰度必须弱于 #d6d6d6(结构标签档): 明细不能盖过结构标签(v10.3 定的次序)。
    ⚠ ul.list 被 7 处共用(卡②隐藏/卡③字体与字号/卡④链接/卡⑤分辨率等) —— 改这条会影响所有清单。 */
 ul.list li {
   padding: 2px 0 2px 10px;
@@ -690,9 +695,7 @@ ul.list li.kv2 .nm {
 }
 ul.list li.kv2 .vl { flex: 0 0 auto; white-space: nowrap; }
 
-/* 小标题: 结构标签必须**强于**其下的样本行(明细), 故色取 #d6d6d6(正文档), 不能更暗。
-   外边距 8px 0 6px, 与卡内块间距同档。 */
-.section-sub { color: #d6d6d6; margin: 8px 0 6px; font-size: 11px; }
+/* v11.73: 原「小标题」样式 .section-sub 已删 —— v11.63 去掉「未嵌入」小标题行后, 它已无使用者。
 
 /* v6.2: 油墨卡按"问题类型"分块(方案 B)——块标题统一样式 */
 /* v6.4: 块标题改"数字染色"——标题文字取常规色(继承正文 #e6e6e6),只有计数 N 用
@@ -735,6 +738,27 @@ ul.list li.kv2 .vl { flex: 0 0 auto; white-space: nowrap; }
 .foot .fbuild { display: block; color: #9c9c9c; font-size: 12px; line-height: 20px; margin-top: 2px; }
 
 .hidden { display: none; }
+/* v11.75(雪糕选 A): 样本名单默认只显示 cap 条, 其余行带 hidden, 由卡内「展开全部」放开。
+   ⚠ [hidden] 必须 !important —— .ink-tbl li 与 ul.list li.kv2 都显式写了 display:flex,
+     作者样式会盖掉 UA 的 [hidden]{display:none}, 不加强制折叠会整片失效。
+   ⚠ 展开靠 JS 移除 hidden 属性(不是切 class), 元素自然恢复原本 display, 不必逐类写恢复规则。 */
+[hidden] { display: none !important; }
+/* v11.77(雪糕改选 C): 箭头落在名单标题行最右侧, 与卡内定位三角错开, 零新增行高。
+   ⚠ 无头截图实测: .ink-block .row-t 是 flex:0 1 auto, 不吃剩余宽度 ⇒ 只写 float:right 时
+     flex 行里 float 被忽略(箭头紧跟定位三角), 普通 div 里 float 箭头还会掉出行盒看不见。
+     ⇒ 标题行统一 flex + 箭头 margin-left:auto。不靠负外边距提回上一行。 */
+.pf-exp-head { display: flex; align-items: baseline; gap: 8px; }
+.pf-exp-arrow { display: inline-flex; align-items: center; justify-content: center;
+  width: 12px; height: 12px; margin: 0; margin-left: auto; padding: 0; flex: 0 0 auto;
+  align-self: center;
+  background: none; border: 0; color: #9c9c9c; cursor: pointer; }
+/* 有 .row-h 的行: 提示自带 margin-left:auto, 箭头只跟 6px, 免得两个 auto 平分空间 */
+.pf-exp-arrow.pf-exp-after-h { margin-left: 6px; }
+.pf-exp-arrow:hover { color: #eeeeee; }
+/* v11.78: 与 .card-locate / .ink-loc 同口径 —— SVG 不吃点击, target 恒落在 button 上 */
+.pf-exp-arrow svg { width: 9px; height: 9px; pointer-events: none; transition: transform .12s; }
+.card.pf-expanded .pf-exp-arrow svg { transform: rotate(90deg); }
+.card.pf-expanded ul.pf-has-more { max-height: 260px; overflow-y: auto; }
 
 /* ---------- v10.14: 叠印卡两版共存(A 方案卡内切换) ----------
    .ovp-dual 容器同时装「简洁版」「分级版」两张卡, data-m 决定显隐;

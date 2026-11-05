@@ -72,7 +72,7 @@ function pfStringify(value) {
 //   __pfUsedCache 两处失效点(进 pfClearUnusedSwatches 即清 + pfClearUnusedGradPattern 读完即清)
 // v11.0: 版本号跃升至 11.0(从 10.60 起进入 11.x 线; 代码内容与 v10.60 一致, 仅版本标识变更)
 // v11.2: 全站胶囊按钮统一 40px 高(纯面板 CSS 改动, ExtendScript 逻辑零变化), 仅同步版本号
-var PF_BUILD = "11.68";
+var PF_BUILD = "11.80";
 
 // v10.46(审查 P2-1): 颜色收集的**轮内**复用缓存。
 //   onClearSwatches 用 execActionMulti 串联 pfClearUnusedSwatches + pfClearUnusedGradPattern,
@@ -99,7 +99,7 @@ var PF_TH_DEF = {
   inkOk: 220,    // 油墨总量达此值算偏重(黄)             <- 原 INK_OK
   inkWarn: 300,  // 油墨总量超过此值算超标(红)           <- 原 INK_WARN
   reso: 300,     // 图片有效分辨率低于此值(ppi)判偏低    <- 原 RESO_MIN
-  cap: 5,        // 油墨/描边采样条数上限(按不同值计)    <- 原 SAMPLE_CAP
+  cap: 5,        // 面板默认显示的样本条数(名单采集上限见 PF_SAMPLE_MAX)
   scan: 3000,    // 每类对象最多扫描数量(防大卡死)       <- 原 MAX_SCAN
   // v10.39(审查 B6): 隐藏文字统计的帧数上限提成真源 —— 前端那句"仅统计前 N 个"改读
   //   hiddenText.cap(本值), 不再两侧各写一个 500。
@@ -115,12 +115,17 @@ var PT2MM = 0.3527777778;     // 1 pt = 0.3528 mm
 //   ⚠ 三处 `depth > 8` 不并入: 那是"符号内再套符号"的层级上限, 语义不同, 有意保持小值。
 var PF_MAX_DEPTH = 64;
 // 工作副本 —— 每次 runPreflight 开头由 pfThApply 按传入值覆盖, 判定一律读这几个
+// v11.75(雪糕选 A): 「名单采集上限」与「默认显示条数」拆成两个值。
+//   cap(=5) 仍是面板默认显示条数, 由 res.th 下发, 前端 thv("cap") 用它算默认可见行;
+//   这里的 200 是扫描时最多保留的不同值 / 条目数(软封顶), 超了才回退到截断提示。
+//   ⚠ 别把它并回 cap: capHint 与前端多处截断都读 cap, 一起放大会把卡片撑长。
+var PF_SAMPLE_MAX = 200;
 var MAX_SCAN = PF_TH_DEF.scan;
 var BLEED_MIN_MM = PF_TH_DEF.bleed;
 var TINY_PT = PF_TH_DEF.tiny;
 var THIN_STROKE_MM = PF_TH_DEF.thin;
 var LIGHT_CH = PF_TH_DEF.light;
-var SAMPLE_CAP = PF_TH_DEF.cap;
+var SAMPLE_CAP = PF_SAMPLE_MAX;
 var INK_OK = PF_TH_DEF.inkOk;
 var INK_WARN = PF_TH_DEF.inkWarn;
 var RESO_MIN = PF_TH_DEF.reso;
@@ -254,6 +259,15 @@ function pfSnippet(tf) {
   } catch (e) { return "(文本)"; }
 }
 
+// v11.73(雪糕): 文本溢出检测已**整体移除** —— "还是不行，检测不出来，彻底删掉这个功能吧"。
+//   历程: v11.60 判 `TextFrame.overflows`(AI 没有此属性, 恒 undefined) ⇒ 空转;
+//         v11.71 改"Σ行字数 + (段数-1)"; v11.72 改社区通行的"两边去回车对账" —— 三轮都没跑通。
+//   结论: Illustrator 的 DOM 不暴露"这一帧溢出了"这个事实, 任何脚本对账都只是近似,
+//     真机表现不可控。与其留一个"看起来在查、实际查不出"的假检测, 不如没有。
+//   ⇒ 别再把它加回来。要确认字有没有排出来, 在 AI 里选中文本框看溢出标记;
+//     而未排出来的字必然同时是"未转曲", 卡③ 的未转曲清单已经覆盖了这批框。
+//   一并删掉: 卡③ 溢出块 / `overset` 统计与 `res.overset` 字段 / 预览工具 --ovs /
+//     bt121 与 bt132 的正面断言(改成"守住已移除")。
 // v6.2: 取对象名(带引号),无 name 返回 "" —— 样本改结构化后由前端拼装展示
 function pfObjName(it) {
   try { if (it.name && it.name !== "") return '"' + it.name + '"'; } catch (e) {}
@@ -851,12 +865,6 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
     // v5.15: 极小字号(<6pt)统计,样本带文字内容
     // v10.2: 只剩一档 —— <TINY_PT 即计入(标红)
     var tiny = { count: 0, samples: [] };
-    // v11.60(雪糕): 文本溢出(Overset) —— TextFrame.overflows 为真即"有字没排出来"。
-    //   印前最高频的漏检项: 溢出的字在画布上根本不存在, 转曲也找不回来 ⇒ 必须转曲前提示。
-    //   ⚠ 成本几乎为零: 这个循环本来就在遍历所有 TextFrame, 且已付过 characterAttributes
-    //     (跨桥解析字体/字号/颜色, 那才是贵的)。overflows 只是 TextFrame 上的布尔属性,
-    //     不读 contents, 单帧增量可忽略。
-    var overset = { count: 0, samples: [], truncated: false };
     var seen = {};
 
     // 油墨总量规则(v10.1, 阈值可调): total < INK_OK 无问题; INK_OK ~ INK_WARN 偏重(黄); > INK_WARN 超标(红)
@@ -1267,7 +1275,7 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
       if (tn === "TextFrame") {
         if (!skipBleed) bleedOf(it, false); // v5.25 出血先于配额;v10.0 剪枝子树跳过出血
         // v4.8: 配额检查前置,totalText 只统计实际扫描数(原在配额前++,超限仍虚增)
-        if (!underQuota("text")) { fonts.truncated = true; black.overprint.truncated = true; overset.truncated = true; return; } // v10.35: 叠印同步挂截断(审查 #4); v11.60: 溢出同步
+        if (!underQuota("text")) { fonts.truncated = true; black.overprint.truncated = true; return; } // v10.35: 叠印同步挂截断(审查 #4); v11.60: 溢出同步
         if (CK.ft) fonts.totalText++; // v10.0: 卡③关 ⇒ 不计文本总数
         // v8.5: characterAttributes 只解析一次 —— 原实现每步都重新解析
         //   textRange.characterAttributes(字体名 / 字号 / 填充色给油墨 / 填充色给极浅 / 叠印 共 5 遍),
@@ -1306,24 +1314,6 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
               if (tiny.samples.length < SAMPLE_CAP) tiny.samples.push({ t: getSnip(), pt: pfRound(fsz) }); // v10.43(P3-1): 硬编码 5 → SAMPLE_CAP
             }
           } catch (eSz) {}
-          // v11.60(雪糕): 文本溢出检测。点文本没有"框", overflows 恒 false, 不必再判 kind;
-          //   读失败一律按"不溢出"放行 —— 宁可漏报也不制造假警报(印前面板里假警报最伤人)。
-          try {
-            if (it.overflows === true) {
-              overset.count++;
-              if (overset.samples.length < SAMPLE_CAP) {
-                // 文本类型(区域/路径/点)给用户判断"改框还是改字号"的依据
-                var kdName = "";
-                try {
-                  var kd = it.kind;
-                  if (kd === TextType.AREATEXT) kdName = "区域文本";
-                  else if (kd === TextType.PATHTEXT) kdName = "路径文本";
-                  else if (kd === TextType.POINTTEXT) kdName = "点文本";
-                } catch (eKd) {}
-                overset.samples.push({ t: getSnip(), k: kdName });
-              }
-            }
-          } catch (eOv) {}
         }
         var rtx = null, fcTx = null;
         if (CK.ik) {
@@ -1586,7 +1576,6 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
     res.resolution = reso;
     res.symbols = symbols;
     res.tiny = tiny; // v5.15: 极小字号统计
-    res.overset = overset; // v11.60: 文本溢出统计
     res.hiddenText = hiddenText; // v5.21: 隐藏文字统计
 
     // 实际出血汇总: 每个画板独立判定;v4.2 起空画板也判定(按 0 出血计入"不足")
@@ -1674,25 +1663,10 @@ function pfIsSystemSwatch(sw, idx) {
 // 颜色 -> 归一化键(色值匹配用; 专色走名字, 单列)
 // ⚠ v0.2 修复(真机 bug): 原用 pfRound()(一位小数)**精确相等**做键 ——
 //   色板里的 C15 M100 Y90 K10 与对象上的同色, 只要浮点尾数差 0.0001,
-//   拼出的键就不同 ⇒ 在用色板被判成"未使用"。改为**统一量化到整数**,
-//   且匹配时改用"容差比较"(见 pfColorKeyParts / pfUsedColorMatch),
-//   不再依赖字符串相等。
-function pfColorKey(c) {
-  if (!c) return null;
-  var t = "";
-  try { t = c.typename; } catch (e) { return null; }
-  try {
-    if (t === "SpotColor") return "SPOT:" + c.spot.name;
-    if (t === "CMYKColor")
-      return "CMYK:" + Math.round(c.cyan) + "," + Math.round(c.magenta) + "," + Math.round(c.yellow) + "," + Math.round(c.black);
-    if (t === "RGBColor") return "RGB:" + Math.round(c.red) + "," + Math.round(c.green) + "," + Math.round(c.blue);
-    if (t === "GrayColor") return "GRAY:" + Math.round(c.gray);
-    if (t === "GradientColor") return "GRAD:" + c.gradient.name;
-    if (t === "PatternColor") return "PATT:" + c.pattern.name;
-    if (t === "NoColor") return null;
-  } catch (e2) { return null; }
-  return null;
-}
+//   拼出的键就不同 ⇒ 在用色板被判成"未使用"。
+//   ⇒ 不再用字符串键, 改成"分解分量 + 容差比较"(pfColorParts / pfColorSameParts)。
+//   v11.73: 已删除失去调用者的 pfColorKey(字符串键) 与 pfColorSame(每次都重新分解两侧),
+//     两者都被 pfColorParts / pfColorSameParts 取代, 留着只会让人以为还在用。
 
 // 把颜色拆成可比较的分量对象(供容差匹配用)
 //   返回 { t:"cmyk"|"rgb"|"gray", v:[...] } 或 null
@@ -1715,20 +1689,10 @@ var PF_COLOR_EPS = 0.5;   // 分量容差(0~100 制), 0.5 足以吸收浮点噪�
 //   两句拒绝删除的文案里又各写死一次(2056/2223), 改一处必漏三处。
 //   文案改成拼接本常量, 五处从此同一真源。
 var PF_COLOR_CAP = 4000;
-function pfColorSame(a, b) {
-  var pa = pfColorParts(a), pb = pfColorParts(b);
-  if (!pa || !pb) return false;
-  if (pa.t !== pb.t) return false;
-  if (pa.v.length !== pb.v.length) return false;
-  for (var i = 0; i < pa.v.length; i++) {
-    if (Math.abs(pa.v[i] - pb.v[i]) > PF_COLOR_EPS) return false;
-  }
-  return true;
-}
 
-// v10.43(审查 P3-2): 左侧已分解版的 pfColorSame —— 供 pfSwatchUsed 的 usedColors 循环
-//   复用同一份分解结果。原 pfColorSame(a, b) 每次都对两侧现分解, 而色板色是固定的 ⇒
-//   N 次比对就白解析 N 遍。原函数保留(其余调用点不变)。
+// 左侧已分解版的"颜色相同"判定 —— 供 pfSwatchUsed 的 usedColors 循环
+//   复用同一份分解结果。色板色是固定的, 不这样做的话 N 次比对就要白解析 N 遍。
+//   v11.73: 原 pfColorSame(a, b) 已随调用者一起删除(它每次对两侧现分解, 只剩这里这一种用法)。
 function pfColorSameParts(pa, b) {
   if (!pa) return false;
   var pb = pfColorParts(b);
@@ -1775,7 +1739,7 @@ function pfSwatchUsed(sw, usedNames, usedColors) {
   var sc = null;
   try { sc = sw.color; } catch (e4) { return true; }
   // v10.43(审查 P3-2): 分解结果外提到循环外 —— sw.color 是固定的, 原实现每次循环
-  //   都经 pfColorSame 重新分解一遍, usedColors 有几百个时就白解析几百遍。
+  //   都重新分解一遍, usedColors 有几百个时就白解析几百遍。
   var paSc = null;
   try { paSc = pfColorParts(sc); } catch (e5) { paSc = null; }
   // v11.56: 色值解析失败必须**保守当在用**。旧实现返回 false(未使用), 在损坏文档或
@@ -1789,7 +1753,7 @@ function pfSwatchUsed(sw, usedNames, usedColors) {
 
 // 收集整个文档"实际被使用"的东西 —— 含隐藏/锁定(见上方口径说明)
 //   返回 { names: {key:1}, colors: [颜色对象...] }
-//   v0.2 重构: 颜色改为**列表**而非字符串键 —— 供 pfColorSame 做容差匹配。
+//   v0.2 重构: 颜色改为**列表**而非字符串键 —— 供容差匹配用。
 //   v0.2 同时补全遍历盲区(真机 bug): 原实现只走 PathItem 的填充/描边, 漏掉:
 //     - CompoundPathItem 自身的填充/描边(原代码下钻 pathItems, 但复合路径的**整体**色在其自身)
 //     - GroupItem 的填充(**组可带填色**, 是 AI 里极常见的用法)
@@ -1810,7 +1774,7 @@ function pfUsedColorKeys(doc) {
   //   colorTruncated 置真 ⇒ 色板删除动作整体拒绝执行, 而实际上全文只用到 1 种颜色。
   //   文案写的是"颜色超过 4000 种", 与行为(对象超过 4000 个)不符, 属于误报。
   //   现在按**完全相同的色值**去重(键用原始分量拼, 不做四舍五入):
-  //     ⚠ 不能用量化键(pfColorKey 的 Math.round): 两个色值四舍五入后同键但实际
+  //     ⚠ 不能用量化键(Math.round 到整数): 两个色值四舍五入后同键但实际
   //       相差近 1.0, 而判定容差只有 0.5 —— 去重会误删"能匹配上色板"的那一个,
   //       反而制造误删。用原始分量拼键, 只有真·同色才合并, 匹配语义零变化。
   //   顺带收益: colors 从"对象数"降到"不同色数", pfSwatchUsed 的容差循环随之变短
