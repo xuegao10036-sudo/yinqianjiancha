@@ -8,11 +8,11 @@
   //   run() 超时后补一枚宽限计时器兜底解锁 scanBusy(防 jsx 挂死锁面板)
   // v11.0: 版本号跃升至 11.0(代码内容与 v10.60 一致, 仅版本标识变更)
   // v11.2: 全站胶囊按钮统一 40px 高(CSS 改动, 前端逻辑无变化), 版本链同步
-  var JS_BUILD = "20261105-6";
+  var JS_BUILD = "20261119-1";
   // 必须与 jsx/preflight.jsx 里的 PF_BUILD 保持一致。
   // JSX 每次返回都会带上它的构建号,前端据此判断 ExtendScript 引擎里
   // 加载的是不是当前版本 —— 不一致就强制 $.evalFile 重载(见 execJsx)。
-  var JSX_BUILD = "11.80";
+  var JSX_BUILD = "11.86";
   // v10.2 收尾: 「耗时较长」提示阈值 —— 原先 20000 在 run() 与 execAction() 各写一遍,
   //   连提示语里的「20 秒」也是手写 ⇒ 改口径要动 3 处、漏一处就文案与行为不一致。收成一处。
   var BUSY_TIMEOUT_MS = 20000;
@@ -179,13 +179,10 @@
     } catch (e) { return s; }
   }
 
-  // ② 单行截断: 超过 maxLen 个字符截断加 …(完整名由调用方放 title)
-  function truncName(s, maxLen) {
-    s = String(s || "");
-    maxLen = maxLen || 30;
-    if (s.length <= maxLen) return s;
-    return s.substring(0, maxLen) + "…";
-  }
+  // ② (v11.82 已删) truncName —— 按字符数硬截断的旧实现。
+  //   三个调用点(字体名 34 / 链接图文件名 40 / 低清图名 34)全部改由 CSS `.trunc`
+  //   按**像素宽**省略: 面板可以拉得很宽, 那时字符数上限就成了"明明放得下也不给看"。
+  //   ⚠ 别再把它加回来 —— 一条 `grep truncName js/main.js` 应当只命中这几行注释。
 
   // ---------- 状态徽标 ----------
   function chip(level, text) {
@@ -204,7 +201,11 @@
     //   口径: 卡片正文里所有"标签/小节/计数行"一律不带尾冒号, 列表靠缩进与圆点分隔。
     //   提示条(.error/.notice)与确认弹窗里的冒号**不动** —— 那是句子的中文标点,
     //   不是"标签分隔符", 去掉会读成病句。
-    return '<div>缺失字体 <b class="bad-t">' + arr.length + "</b> 个</div>" +
+    // v11.82: 标题行必须带 .pf-exp-head（= flex），否则展开箭头的 margin-left:auto 失效,
+    //   列表超过 cap 行时箭头会紧贴在「个」字后面而不是靠右。
+    //   ⚠ 整句包一层 <span>: .pf-exp-head 带 gap:8px, 裸文本会被 flex 拆成匿名 flex item,
+    //     "缺失字体" / 数字 / "个" 之间各插 8px 间隙, 字句被拉开。包成**一个** item 就没事。
+    return '<div class="pf-exp-head"><span>缺失字体 <b class="bad-t">' + arr.length + "</b> 个</span></div>" +
       '<ul class="list">' + items + "</ul>";
   }
 
@@ -1503,7 +1504,7 @@
       }
       if (badAbs.length) {
         bleedLevel = "warn";
-        bleedHtml = '<div>出血不足 ' + thv("bleed") + 'mm 的画板 <b class="warn-t">' + badAbs.length + "</b> 个</div>" +
+        bleedHtml = '<div class="pf-exp-head"><span>出血不足 ' + thv("bleed") + 'mm 的画板 <b class="warn-t">' + badAbs.length + "</b> 个</span></div>" +
           '<ul class="list">' + badAbs.join("") + "</ul>";
       } else {
         bleedHtml = '出血全部 ≥ ' + thv("bleed") + 'mm，达标。';
@@ -1607,7 +1608,10 @@
       // v11.77(C): 箭头改落这一行最右侧, 文字仍在最左, 不补占位行。
       //   pf-exp-head 让这行变 flex(其它标题行本来就是 flex), 箭头才能 margin-left:auto 贴右。
       //   原来它是 card-body 里的裸文本(承载不了按钮); 包 div 后仍独占一行, 视觉零变化。
-      var parts = '<div class="pf-exp-head">未转曲文本框 <b class="warn-t">' + d.fonts.totalText + "</b> 个</div>";
+      // v11.82: 整句再包一层 <span> —— .pf-exp-head 带 gap:8px, 裸文本会被拆成
+      //   匿名 flex item, "未转曲文本框"/数字/"个" 之间各多 8px 间隙。
+      //   包成单个 item 后 gap 只剩"文字块 ↔ 箭头"一处, 而箭头靠 margin-left:auto 贴右, 不受影响。
+      var parts = '<div class="pf-exp-head"><span>未转曲文本框 <b class="warn-t">' + d.fonts.totalText + "</b> 个</span></div>";
       if (d.fonts.names.length) {
         // v5.0: 字体名可能超长(罕见),同样单行截断+title 悬停看全名
         // v11.75(雪糕选 A): 原 v5.19 的 8 条硬截断是「前端第二道截断」——
@@ -1617,7 +1621,10 @@
         //   卡名「字体 · 转曲」已经交代了这份名单是什么, 多一个"字体:"只是把一句标题切成两截。
         parts += '<ul class="list">' + d.fonts.names.map(function (n) {
           var full = decodeImgName(n);
-          return '<li class="trunc" title="' + esc(full) + '">' + esc(truncName(full, 34)) + "</li>";
+          // v11.82(雪糕): 去掉 JS 侧硬截断 —— 原来 truncName(full, 34) 先把名字砍到 34 字,
+          //   面板拉宽(无 max-width, 可以很宽)时明明放得下也只显示 34 字。
+          //   单行省略已由 CSS `.trunc` 按**像素宽**做(text-overflow:ellipsis), 交给它才对。
+          return '<li class="trunc" title="' + esc(full) + '">' + esc(full) + "</li>";
         }).join("") + "</ul>";
       }
       if (hasMissing) parts += renderMissingFonts(missingFonts);
@@ -1796,7 +1803,8 @@
         var fn = decodeImgName(it.name);
         var ff = decodeImgName(it.file);
         return '<li class="trunc" title="' + esc(ff) + '">' + (it.missing ? '<span class="warn-tri">⚠</span> ' : "") +
-          esc(truncName(fn, 40)) + (it.missing ? ' <span class="bad-t">源文件不存在</span>' : "") + "</li>";
+          // v11.82: 同字体名单 —— 不再 JS 硬截断(原 truncName(fn, 40)), 交给 CSS `.trunc`。
+          esc(fn) + (it.missing ? ' <span class="bad-t">源文件不存在</span>' : "") + "</li>";
       }).join("") + "</ul>";
       // v6.9: 样本截断提示按用户要求删除(truncated 仍代表扫描配额上限,提示保留)
       if (im.truncated) iHtml += '<div class="dim">(仅列出前 ' + thv("scan") + ' 张)</div>';
@@ -1817,7 +1825,7 @@
         // v5.0: 文件名先 URL 解码再截断显示;完整名放 title(悬停可查)
         iHtml += '<ul class="list">' + rs.samples.map(function (s) {
           var full = decodeImgName(s.name);
-          var shown = truncName(full, 34);
+          // v11.82: 不再 JS 硬截断(原 truncName(full, 34)), 交给 CSS `.trunc` 按像素宽省略。
           // v8.2: jsx 的 ppiOf 返回**原值**(带小数,为的是卡 300 阈值时不误判),显示时不输出长小数
           //   —— 与油墨 total 同一口径(jsx 传原值 / 前端格式化)。
           //   旧版(≤v8.1)这里直接输出 s.ppi ⇒ 面板上出现 "170.776863599299 ppi" 这种长小数。
@@ -1828,7 +1836,7 @@
           var ppiShow = (typeof s.ppi === "number" && isFinite(s.ppi)) ? (Math.round(s.ppi * 10) / 10) : s.ppi;
           // v11.57(雪糕): 两列 + 单位前留空格, 与字号块同一套(详见上方字号那条)。
           return '<li class="kv2" title="' + esc(full) + "  " + ppiShow + ' ppi">' +
-            '<span class="nm">' + esc(shown) + '</span>' +
+            '<span class="nm">' + esc(full) + '</span>' +
             '<span class="vl">' + ppiShow + " ppi</span></li>";
         }).join("") + "</ul>";
       }

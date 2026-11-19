@@ -72,7 +72,7 @@ function pfStringify(value) {
 //   __pfUsedCache 两处失效点(进 pfClearUnusedSwatches 即清 + pfClearUnusedGradPattern 读完即清)
 // v11.0: 版本号跃升至 11.0(从 10.60 起进入 11.x 线; 代码内容与 v10.60 一致, 仅版本标识变更)
 // v11.2: 全站胶囊按钮统一 40px 高(纯面板 CSS 改动, ExtendScript 逻辑零变化), 仅同步版本号
-var PF_BUILD = "11.80";
+var PF_BUILD = "11.86";
 
 // v10.46(审查 P2-1): 颜色收集的**轮内**复用缓存。
 //   onClearSwatches 用 execActionMulti 串联 pfClearUnusedSwatches + pfClearUnusedGradPattern,
@@ -675,6 +675,19 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
     }
     var doc = app.activeDocument;
     res.ok = true;
+    // v11.81: 定位缓存重置 —— 必须在**任何扫描之前**。它同时充当"本轮各卡开关"的快照，
+    //   定位端靠这份快照判断"这张卡这轮到底扫没扫过"（没扫过就回落旧路径重算）。
+    pfLocCacheReset(doc, CK);
+    // v11.82: 链接图像素尺寸缓存**按轮清空**。
+    //   原来 PF_PX_CACHE 只在文件末尾声明一次、全程不清 —— 而 ExtendScript 引擎是会话常驻的,
+    //   于是一张链接图在外部被换成高清版(路径不变)、用户在 AI 里更新链接后再点「开始检查」,
+    //   读到的仍是上一轮缓存里的旧像素 ⇒ 分辨率偏低一直误报, 只有重开面板/重启 AI 才恢复。
+    //   清空代价可忽略: 命中缓存的收益是"同一轮内同一文件只读一次 4KB 文件头",
+    //   链接图通常几张, 每轮重读一遍完全不敏感。
+    PF_PX_CACHE = [];
+    // v11.81: 当前正在下钻的符号实例（null = 不在符号里）。入缓存时一律落在这个实例上 ——
+    //   符号定义源里的对象不在画布上，塞进 selection 是原生层崩溃（见「扫描缓存」一节）。
+    var curSym = null;
     // v11.39(审查 #4): 前置段兜底 —— 这三处是全函数唯一没有局部 try 的裸读
     //   (其余每一类扫描都有), 任一抛错就落到末尾的外层 catch ⇒ ok=false ⇒ 前端
     //   九张卡全部空白。损坏/非常规文档、切换文档的瞬时状态下真会遇到。
@@ -797,7 +810,7 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
     //   只统计不修改; 真正删除走 pfCleanup(doStray, doUnpaint, doText)(卡片「一键清理」)。
     //   ⚠ 扫描与删除共用 pfJunkEach 同一套判定, 避免"报 N 删 M"。
     if (CK.tx) {
-      res.cleanup = pfCleanupScan(doc);
+      res.cleanup = pfCleanupScan(doc, PF_LOC_SCAN ? PF_LOC_SCAN.c9 : null);
     }
 
     // ---------- 2b. 隐藏对象检查 ----------
@@ -953,15 +966,28 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
         //   "同一节点既隐藏又锁定"的对象(那时 reason 报的是 hidden)。
         if (blkO && blkO.locked) black.overprint.locked++;
       }
+      // v11.81: 卡⑦ 入缓存。⚠ 必须去重 —— 同一对象的填充与描边会各命中一次，
+      //   不去重会让 doc.selection 里出现同一个对象两次（原生层报错）。
+      if (PF_LOC_SCAN && item) pfLocPush(PF_LOC_SCAN.c7, curSym || item);
       pfSampleAdd(black.overprint.samples,
         { src: src, where: where, desc: info.desc, name: name, white: info.white, cls: cls.cls },
         src + "|" + where + "|" + info.desc + "|" + name, SAMPLE_CAP);
     }
 
-    function scanPathInk(pi) {
+    // v11.81: 第 2 参 owner = **要入缓存的对象本体**。
+    //   复合路径调用点传的是 it.pathItems[0]（只用于判色），入池必须收复合路径本身 ——
+    //   与 v11.49/v11.54 那条"判色下钻、收本体"同一个口径，别在缓存这里又破一次。
+    function scanPathInk(pi, owner) {
       if (!CK.ik && !CK.ov) return; // v10.0: 卡⑥⑦都关 ⇒ 整个路径油墨扫描跳过(一个属性都不读)
       var bp = black.path;
       var nm = pfObjName(pi);
+      // v11.82: 入缓存 / 判锁定的**本体**。复合路径调用点传进来的是 pathItems[0]（只用于判色），
+      //   本体必须用它自己 ⇒ 下面 pfOvpAdd 的第 5 参一律传 ownRef，不能传 pi。
+      //   ⚠ 不这么改的后果: 卡⑦ 池子里进的是组件, 定位时塞进 doc.selection 会崩(v11.48 同类雷)。
+      var ownRef = owner || pi;
+      // v11.81: 卡⑥ 四块的命中标记。只做布尔累加，**不额外读任何属性** ——
+      //   用的就是下面本来就要算的 rfc / rsc / swMm。
+      var lcO = false, lcH = false, lcL = false, lcT = false;
       // v8.5: stroked / fillColor / strokeColor 各读一次后复用 —— 原实现 stroked 读 3 次
       //   (油墨/细描边/极浅各一次)、两个色句柄各读 2 次;同一个色对象一次读出 ink+light。
       var stk = false;
@@ -984,8 +1010,19 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
         if (fld) { try { fc = pi.fillColor; } catch (e1) {} }
         try { rfc = pfInkLightBoth(fc); } catch (e3) { rfc = null; }
         try { if (stk) { sc = pi.strokeColor; rsc = pfInkLightBoth(sc); } } catch (e4) { rsc = null; }
-        if (rfc) inkBucket(bp, rfc, nm, "填充");
-        if (rsc) inkBucket(bp, rsc, nm, "描边");
+        // v11.81: 两个色各判一次卡⑥ 的四块 —— 判据与 inkBucket / pfLocInkAny 同源
+        //   （total > INK_WARN 记超标；INK_OK ≤ total ≤ INK_WARN 记偏重；light 非空记极浅）。
+        //   一个对象的填充与描边都命中同一块时只记一次 ⇒ 入池时天然不重复。
+        if (rfc) {
+          inkBucket(bp, rfc, nm, "填充");
+          if (rfc.total >= 0) { if (rfc.total > INK_WARN) lcO = true; else if (rfc.total >= INK_OK) lcH = true; }
+          if (rfc.light) lcL = true;
+        }
+        if (rsc) {
+          inkBucket(bp, rsc, nm, "描边");
+          if (rsc.total >= 0) { if (rsc.total > INK_WARN) lcO = true; else if (rsc.total >= INK_OK) lcH = true; }
+          if (rsc.light) lcL = true;
+        }
       }
       // v8.3: 叠印检查(图形侧,pageItem 级)——真机 28.0.0 上 PathItem 的这两个属性名尚未验证,
       //   读不到 / 抛异常由 pfOvp* 兜成 false(宁可不报,绝不误报);色值只在命中时才读,摊薄成本。
@@ -994,13 +1031,13 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
         try {
           if (pfOvpFill(pi)) {
             if (!fc) { try { fc = pi.fillColor; } catch (e1b) {} } // v10.11: ⑥关时命中才补读
-            pfOvpAdd("path", "填充", fc, nm, pi);
+            pfOvpAdd("path", "填充", fc, nm, ownRef);
           }
         } catch (e8) {}
         try {
           if (pfOvpStroke(pi)) {
             if (!sc) { try { sc = pi.strokeColor; } catch (e2b) {} } // v10.11: 原 scO 补读改为统一兜底
-            pfOvpAdd("path", "描边", sc, nm, pi);
+            pfOvpAdd("path", "描边", sc, nm, ownRef);
           }
         } catch (e9) {}
       }
@@ -1013,6 +1050,7 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
           var swMm = pi.strokeWidth * PT2MM;
           if (swMm >= 0 && swMm < THIN_STROKE_MM - 0.005) {
             bp.thin++;
+            lcT = true;   // v11.81: 同上，只是布尔累加
             var swR = Math.round(swMm * 100) / 100;
             pfSampleAdd(bp.thinSamples, { mm: swR, name: nm }, String(swR), SAMPLE_CAP);
           }
@@ -1035,6 +1073,16 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
             { src: "path", where: "描边", desc: rsc.light, name: nm }, rsc.light + "|描边|" + nm + "|path", SAMPLE_CAP);
         }
       } catch (e7) {} }
+      // v11.81: 卡⑥ 入缓存。这里用裸 push 而非 pfLocPush ——
+      //   上面把填充/描边两个来源合并进同一组布尔，同一对象在同一个池子里最多进一次。
+      //   ⚠ own 必须是**本体**（复合路径不是它的 pathItems[0]），且符号下钻期间换成实例。
+      if (PF_LOC_SCAN && CK.ik && (lcO || lcH || lcL || lcT)) {
+        var own = curSym || owner || pi;
+        if (lcO) PF_LOC_SCAN.c6.over.push(own);
+        if (lcH) PF_LOC_SCAN.c6.heavy.push(own);
+        if (lcL) PF_LOC_SCAN.c6.light.push(own);
+        if (lcT) PF_LOC_SCAN.c6.thin.push(own);
+      }
     }
 
     // ---------- 图片嵌入 + 分辨率 数据结构 ----------
@@ -1052,7 +1100,7 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
     //   不再每轮检查都扫一遍文档级 placedItems(见文件末尾 pfLinkScope)
     var imgs = { linked: [], linkedCount: 0, embeddedCount: 0, missingCount: 0, truncated: false };
 
-    // v4.8: Symbol 内部扫描统计(符号内可能含未转曲文字/低清图/油墨超标/RGB,
+    // v4.8: Symbol 内部扫描统计(符号内可能含未转曲文字/低清图/油墨超标,
     // 旧版直接跳过导致漏检;下钻定义源后其内部对象进入统一树遍历)
     var symbols = { count: 0, scanned: 0, truncated: false };
 
@@ -1078,6 +1126,8 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
       // v11.46: 阈值比较统一走 pfResoLow(带容差, 与定位端同一个函数)
       if (pfResoLow(ppi)) {
         reso.lowCount++;
+        // v11.81: 卡⑤ 入缓存。判据与定位端同源（都用 pfResoLow，带 1% 容差）。
+        if (PF_LOC_SCAN) pfLocPush(PF_LOC_SCAN.c5, curSym || item);
         // v5.19: 15→8; v6.5: →5(列表统一"仅列前 5")
         // v7.9: 只留**分辨率最低的 5 张**,并按 ppi 从低到高排好(原来取的是文档里最先遇到的 5 张)
         //   这里用递增序号做 key ⇒ 不去重(每张图各占一条;同图重复置入也各自可见)
@@ -1175,6 +1225,36 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
     }
 
     // ---------- 树遍历 ----------
+    // v11.81: 隐藏子树「只收引用」的收集器 —— 见文件末尾「扫描缓存」一节第 ① 条。
+    //   检查端对隐藏内容一律跳过（隐藏内容不参与印刷统计，这是 v4.8 以来的口径），
+    //   但定位端必须能找到它们，否则"问题对象都在隐藏图层里"时会回报"没找到可定位的对象"，
+    //   而那恰恰是用户最需要看到的那句话。⇒ 这里只读 typename + 存引用，**不判任何色值/叠印/分辨率**。
+    //   ⚠ 遇到符号实例直接置 hidCut：它自身没有色值/叠印/分辨率属性，必须下钻定义源才判得出，
+    //     而定义源对象不能进 selection —— 这条路整个交回旧路径（pfLocGather 会下钻并收实例）。
+    function pfLocHidGather(container, depth) {
+      if (!PF_LOC_SCAN || depth > PF_MAX_DEPTH) return;
+      var kids = null;
+      try { kids = container.pageItems; } catch (eHG) { PF_LOC_SCAN.hidCut = true; return; }
+      if (!kids) return;
+      var lim = 0;
+      try { lim = kids.length; } catch (eHL) { PF_LOC_SCAN.hidCut = true; return; }
+      for (var i = 0; i < lim; i++) {
+        var k = null;
+        try { k = kids[i]; } catch (eHK) { continue; }
+        if (!k) continue;
+        var tn = "";
+        try { tn = k.typename; } catch (eHT2) { continue; }
+        if (tn === "GroupItem") { pfLocHidGather(k, depth + 1); continue; }
+        if (tn === "SymbolItem") { PF_LOC_SCAN.hidCut = true; return; }
+        if (tn === "PathItem" || tn === "CompoundPathItem" || tn === "TextFrame" ||
+            tn === "RasterItem" || tn === "PlacedItem") {
+          if (PF_LOC_HID_N >= PF_LOC_HID_MAX) { PF_LOC_SCAN.hidCut = true; return; }
+          PF_LOC_HID_N++;
+          PF_LOC_SCAN.hid.push(k);
+        }
+      }
+    }
+
     // 单个对象: 按 typename 分派(可见性已由 walkLayer 的图层过滤保证,
     // 无需再传 vis 标志 —— v4.8 清理死参数)
     // v10.0: 第三参 skipBleed —— 组级剪枝命中后向整棵子树传递"跳过出血测量"
@@ -1197,6 +1277,8 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
             if (underQuota("group")) hidden.itemCount++;
             else hidden.truncated = true; // v4.8: 隐藏组超配额只挂 hidden 自己的截断
           }
+          // v11.81: 组内对象收进隐藏池（只存引用，判据留给定位端）—— 见「扫描缓存」第 ① 条
+          if (PF_LOC_SCAN) pfLocHidGather(it, 0);
           return;
         }
         // v8.6: 组级出血测量改为"只在子项读不出来时兜底" —— 原来无条件先测一次, 而组的
@@ -1269,6 +1351,16 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
           if (underQuota(cat)) hidden.itemCount++;
           else hidden.truncated = true; // v5.6/B1: 超配额也必须挂截断标记,否则隐藏数被低估且界面无提示
         }
+        // v11.81: 收进隐藏池（只存引用，不判色/叠印/分辨率）。符号实例、网格对象都不收 ——
+        //   前者要靠下钻定义源才判得出（见 pfLocHidGather 说明），后者与本功能无关。
+        if (PF_LOC_SCAN) {
+          if (tn === "SymbolItem") PF_LOC_SCAN.hidCut = true;
+          else if (tn === "PathItem" || tn === "CompoundPathItem" || tn === "TextFrame" ||
+                   tn === "RasterItem" || tn === "PlacedItem") {
+            if (PF_LOC_HID_N >= PF_LOC_HID_MAX) PF_LOC_SCAN.hidCut = true;
+            else { PF_LOC_HID_N++; PF_LOC_SCAN.hid.push(it); }
+          }
+        }
         return;
       }
 
@@ -1324,6 +1416,16 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
             try { rtx = pfInkLightBoth(fcTx); } catch (eTi) { rtx = { total: -1, type: "mixed", desc: "混合颜色" }; }
           }
           if (rtx) inkBucket(black.text, rtx, getSnip(), "填充");
+          // v11.81: 卡⑥ 入缓存（文字侧只判填充色 —— 与定位端 match 的文字口径一致，
+          //   描边与"描边<0.1mm"块文字永不参与）。阈值同源：total > INK_WARN / ≥ INK_OK。
+          if (PF_LOC_SCAN && rtx) {
+            var ownT = curSym || it;
+            if (rtx.total >= 0) {
+              if (rtx.total > INK_WARN) PF_LOC_SCAN.c6.over.push(ownT);
+              else if (rtx.total >= INK_OK) PF_LOC_SCAN.c6.heavy.push(ownT);
+            }
+            if (rtx.light) PF_LOC_SCAN.c6.light.push(ownT);
+          }
           // v6.2: 色值极浅(文字填充色);v7.8: 按不同色值收,n 累加全量次数
           if (rtx && rtx.light) {
             black.light.count++;
@@ -1361,7 +1463,10 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
       if (tn === "CompoundPathItem") {
         if (!skipBleed) bleedOf(it, true);  // v5.25 出血先于配额;v10.0 剪枝子树跳过出血
         if (!underQuota("compound")) { black.path.truncated = true; black.overprint.truncated = true; return; } // v10.35: 同上
-        try { scanPathInk(it.pathItems[0]); } catch (eC) {}
+        // ⚠ v11.82: 第 2 参**必须**传它自己 —— 见 scanPathInk 第 2 参说明。
+        //   漏传 ⇒ 入池的成了 pathItems[0] 这个组件; 而组件不是可选中对象,
+        //   塞进 doc.selection 与 v11.48 同类(原生层崩, try/catch 接不住)。
+        try { scanPathInk(it.pathItems[0], it); } catch (eC) {}
         // ⚠ v10.53(审查 A2, **待真机验证再动**): 复合路径的叠印口径目前**三处不一致** ——
         //   ① 这里(检查端)只读 pathItems[0] 这一个组件;
         //   ② 动作侧文档级循环(doc.compoundPathItems)把 CompoundPathItem 自身交给
@@ -1397,7 +1502,15 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
           if (symSrc && symSrc.pageItems) {
             var symKids = symSrc.pageItems;
             var skLim = symKids.length; // v10.0: 长度外提
-            for (var sk = 0; sk < skLim; sk++) visitItem(symKids[sk], depth + 1);
+            // v11.81: 下钻期间记住**当前实例** —— 定义源里的对象不在画布上，
+            //   入缓存必须换成实例（否则把定义源对象塞进 selection 是原生层崩溃）。
+            //   ⚠ 出错也要复原 curSym，否则后续对象会被错记到这个实例上。
+            var symPrev = curSym;
+            curSym = it;
+            try {
+              for (var sk = 0; sk < skLim; sk++) visitItem(symKids[sk], depth + 1);
+            } catch (eSK) { curSym = symPrev; throw eSK; }
+            curSym = symPrev;
             symbols.scanned++;
           }
         } catch (eSym) {}
@@ -1407,7 +1520,8 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
         if (!skipBleed) bleedOf(it, false); // v5.25 出血先于配额;v10.0 剪枝子树跳过出血
         if (!underQuota("raster")) { reso.truncated = true; imgs.truncated = true; return; }
         imgs.embeddedCount++; // v5.7: 只统计可见的嵌入位图
-        resoCheck(it, embName(it, rasterIdx, "(嵌入位图" + (rasterIdx + 1) + ")"));
+        var embLb = embName(it, rasterIdx, "(嵌入位图" + (rasterIdx + 1) + ")");
+        resoCheck(it, embLb);
         rasterIdx++;
         return;
       }
@@ -1619,6 +1733,11 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10) {
       });
     }
     res.bleed = bleed;
+
+    // v11.81: 扫描完整走完才给定位缓存盖章。中途抛错落到下面的外层 catch 时,
+    //   缓存是半成品(某些卡没扫完) —— 拿它定位会漏对象、回报的数字偏小,
+    //   不如让定位端回落旧路径重算一遍。
+    if (PF_LOC_SCAN) { try { PF_LOC_SCAN.ready = true; } catch (eLcR) {} }
 
     return pfReturn(res);
   } catch (err) {
@@ -3210,7 +3329,11 @@ function pfJunkEach(doc, cb) {
 }
 
 // 只读统计: 三类各多少个(其中隐藏/锁定各几个) + 空文本里"纯空格"的条数
-function pfCleanupScan(doc) {
+// v11.81: 第 2 参 col = 定位缓存池(可空)。pfJunkEach 的判定**本就含隐藏/锁定对象**
+//   (它从不看 visible/hidden), 所以命中对象直接收进 col 就是定位端要的完整集合 ——
+//   卡⑨ 不需要像 ⑤⑥⑦ 那样再补一遍隐藏池。同一个对象只会回调一次(三类互斥),
+//   故这里裸 push 即可, 不必走 pfLocPush 的引用去重。
+function pfCleanupScan(doc, col) {
   var out = {
     stray:     { count: 0, hidden: 0, locked: 0 },
     unpainted: { count: 0, hidden: 0, locked: 0 },
@@ -3218,6 +3341,7 @@ function pfCleanupScan(doc) {
     spaceOnly: 0
   };
   pfJunkEach(doc, function (kind, it) {
+    if (col) { try { col.push(it); } catch (eCol) {} }
     var o = out[kind];
     if (!o) return;
     o.count++;
@@ -3572,6 +3696,60 @@ function pfResoLow(ppi) {
   return (ppi < RESO_MIN * (1 - RESO_TOL_PCT));
 }
 
+// ============================================================
+// 定位用「扫描缓存」(v11.81 / 雪糕选 A: 通用缓存)
+//   问题: 卡⑤⑥⑦⑨ 的「查找位置」每次都要把整棵树重走一遍 —— ⑥⑦ 走
+//     pfLocGather(doc.layers)、⑨ 走 pfJunkEach，两条都是全树递归，
+//     3000 对象 × 12~15 次属性读 ⇒ 真机 1~4 秒。
+//   做法: **检查轮已经把这批对象逐个判过一遍了**（同一套判据、同一个函数），
+//     顺手把命中的对象引用存进下面几个池子；定位时直接取数组，不再重走树。
+//     省下的正是"对同一批对象把一模一样的判定再做一次"这份纯重复劳动。
+//   ⚠ 三个必须守住的点（改这段前先读完）:
+//     ① **隐藏对象检查端不判**（隐藏内容不参与印刷统计）⇒ 缓存里不能只有可见的。
+//        否则"问题对象全在隐藏图层里"时定位会回报"没找到可定位的对象" ——
+//        而那句话恰恰是用户最需要看到的（他知道该去哪个图层找）。
+//        ⇒ visitItem 遇到隐藏组 / 隐藏对象时**只收引用不判据**，放进 hid 池；
+//        定位端对这批单独跑一遍判据（隐藏对象本来就少，代价回到旧水平）。
+//     ② **符号实例**: 符号定义源里的对象不在画布上，塞进 doc.selection 会崩
+//        （v11.48 同类雷）。⇒ 下钻符号期间用 curSym 记住当前实例，
+//        一切入池都落在这个实例上；绝不能把定义源对象存进池子。
+//     ③ **失效只认「同一文档引用 + 最近一轮扫描跑完」**。用户改稿后再点定位会拿到
+//        旧引用 —— pfLocOk 的 try/catch 会让它落进"锁定/隐藏"计数，不崩但数字不准；
+//        要准确就重新检查一次（旧版同样是"先检查再定位"的流程）。
+//   ⚠ PF_LOC_USE_SCAN_CACHE = false 整条回落旧路径（一行切换，出问题先关它）。
+//   ⚠ ③④ **不进缓存**: 它们走 doc.textFrames / doc.placedItems 文档级集合，
+//     本来就快（v11.44 实测过），加缓存只会丢掉"隐藏对象"的口径。
+// ============================================================
+var PF_LOC_USE_SCAN_CACHE = true;
+var PF_LOC_SCAN = null;
+// 隐藏池配额 —— 超大隐藏子树（整本画册的隐藏备份页）不该把检查拖慢。
+//   溢出就置 hidCut ⇒ 该轮定位整体回落旧路径：宁可慢一次，不给错结果。
+var PF_LOC_HID_MAX = 2000;
+var PF_LOC_HID_N = 0;
+
+function pfLocCacheReset(doc, ck) {
+  PF_LOC_SCAN = {
+    doc: doc,
+    ck: ck,                 // 检查轮各卡开关快照 —— 该卡这轮没扫 ⇒ 定位回落旧路径
+    ready: false,           // 扫描完整走完才盖章（中途抛错的是半成品，不能用）
+    c5: [], c7: [], c9: [],
+    c6: { over: [], heavy: [], light: [], thin: [] },
+    hid: [],
+    hidCut: false
+  };
+  PF_LOC_HID_N = 0;
+}
+
+// 按**引用**去重后入池 —— 同一对象重复出现会让 doc.selection 报错（v11.48 同类雷）。
+//   末尾快速判覆盖最常见的一种重复：卡⑦ 同一对象的填充、描边先后各命中一次。
+function pfLocPush(arr, it) {
+  if (!arr || !it) return;
+  var n = arr.length;
+  if (n > 0 && arr[n - 1] === it) return;
+  for (var i = 0; i < n; i++) { if (arr[i] === it) return; }
+  arr.push(it);
+}
+
 // 父容器(组 / 图层)可选中状态缓存 —— 同一容器下的对象不再逐个重爬父链（v11.47）
 //   雪糕: "选中速度还能再快点么？还是没 AI 自带的选择所有文本快"。
 //   原来每帧都从自己往上爬: 每层读 3 个属性(locked / hidden / visible) —— 500 个文本帧
@@ -3781,61 +3959,32 @@ function pfLocInkAny(c, sub) {
   return lt;                                                  // 无 sub: 色版极浅
 }
 
-// 按卡号收集该卡的问题对象
-//   3 字体·转曲   4 图片嵌入   5 图片分辨率
-//   6 油墨·描边   7 叠印       9 清理
-// v11.53: 第 4 参 sub 只对卡⑥ 有意义(over/heavy/light/thin) —— 块内按钮各选各的。
-//   传空 = 卡⑥ 四块并集, 与 v11.52 口径一致。
-function pfLocCollect(doc, n, out, sub) {
-  // 卡⑨ 直接复用清理遍历 —— 它已含"剪切组内单点/未上色对象不动"的保护判定
-  if (n === 9) {
-    pfJunkEach(doc, function (kind, it) { out.push(it); });
-    return;
-  }
-  var match = null;
-  // v11.44: ③④⑤ 改成"直接取文档级专类集合", 不再遍历整棵树。
-  //   雪糕: "现在这个字体转曲这块选择起来会有点慢"。
-  //   慢的原因: 卡③ 只要 TextFrame, 却先走 pfLocGather 把文档里**每一个对象**的 typename
-  //   读一遍(实测稿子里 3000+ 路径对象), 跨桥读几千次只为挑出几十个文本框。
-  //   doc.textFrames / placedItems / rasterItems 是文档级集合, 本身含组内对象;
-  //   数量比"全部页面项"小一两个数量级 ⇒ 跨桥次数跟着降下来。
-  //   ⚠ ⑥⑦ **保持树递归**: 它们要 pathItems(3000+) + compoundPathItems + textFrames,
-  //     三个集合逐个按下标索引反而更慢 —— v11.33 实测集合索引 476ms vs 树递归 7.9ms。
-  if (n === 3) {
-    // 未转曲的必然还是 TextFrame(转曲后已变 Path/Group)
-    pfLocTake(doc, "textFrames", out, null);
-    return;
-  }
-  if (n === 4) {
-    pfLocTake(doc, "placedItems", out, function (it) {
-      var em = false;
-      try { em = (it.embedded === true); } catch (e4a) { return false; }
-      return !em;
-    });
-    return;
-  }
+// 卡⑤⑥⑦ 的命中判据 —— **单一份真源**。
+//   回落路径(pfLocGather)与缓存路径(隐藏池补判)共用它: 缓存里那批"检查端判过的"
+//   对象直接取用, 但"检查端没判过的隐藏对象"必须在这里按同一套标准补判 ——
+//   各抄一份必然走偏(⑥⑦ 的定位判据与检查端不同源, 历史上已经出过三次事故)。
+//   返回 null = 该卡不走 match 形式(③④ 走文档级集合, ⑨ 走 pfJunkEach)。
+function pfLocMatchFor(n, sub) {
   if (n === 5) {
-    // 两个集合并集: rasterItems(位图) 与 placedItems(放置图)。
-    //   ⚠ 二者可能命中同一个对象, pfLocTake 内部按引用去重。
     // v11.46: 判定走全局 pfResoLow(带 1% 容差) —— 与检查端 resoCheck 同一个函数,
     //   避免"卡里说达标、定位却选上"这种不同源。
-    pfLocTake(doc, "rasterItems", out, function (it) {
-      return pfResoLow(pfPpiReal(it));
-    });
     // v11.45: placedItems 侧必须**排除矢量链接** —— 与检查端 resoCheck 前那道
     //   isVec 跳过同源。否则链接的 PDF/EPS 会被当成 72ppi 低清选中,
     //   而卡⑤ 正文里根本没报它(检查端早跳过了)。
     // v11.50: 分辨率取值改 pfPpiReal —— 链接图读文件像素, 不再用 matrix(实测偏差 4.17 倍)
-    pfLocTake(doc, "placedItems", out, function (it) {
-      if (pfLocIsVec(it)) return false;
-      return pfResoLow(pfPpiReal(it));
-    });
-    return;
+    return function (it, tn) {
+      if (tn === "RasterItem") return pfResoLow(pfPpiReal(it));
+      if (tn === "PlacedItem") {
+        if (pfLocIsVec(it)) return false;
+        return pfResoLow(pfPpiReal(it));
+      }
+      return false;
+    };
   }
   if (n === 6) {
     // v11.53: 块内按钮的子类型。"" = 四块并集(卡头旧入口/兼容)。
     var inkSub = sub || "";
-    match = function (it, tn) {
+    return function (it, tn) {
       if (tn === "TextFrame") {
         // 块④ 描边<0.1mm 检查端**只统计图形** ⇒ 文字侧永不参与该块
         if (inkSub === "thin") return false;
@@ -3880,8 +4029,9 @@ function pfLocCollect(doc, n, out, sub) {
       try { if (stk) f2 = src.strokeColor; } catch (e6) {}
       return pfLocInkAny(f1, inkSub) || pfLocInkAny(f2, inkSub);
     };
-  } else if (n === 7) {
-    match = function (it, tn) {
+  }
+  if (n === 7) {
+    return function (it, tn) {
       // v11.45: 文字必须走**字符级** —— 真机 AI 28 上 TextFrame 没有对象级
       //   fillOverprint / strokeOverprint(检查端 v8.3 有探针实测记录), pfOvpFill
       //   读不到属性会 try/catch 成 false。v11.44 这里用对象级判 ⇒ 文字叠印
@@ -3905,6 +4055,125 @@ function pfLocCollect(doc, n, out, sub) {
       return pfOvpFill(src7) || pfOvpStroke(src7);
     };
   }
+  return null;
+}
+
+// v11.81: 从检查轮的扫描缓存取命中对象。
+//   返回 true = 已处理完(哪怕结果是空的); 返回 false = 缓存不可用, 调用方回落旧路径。
+//   ⚠ 五道闸门缺一不可, 每一道都对应一种"缓存里根本没有这张卡的数据"的现实:
+//     ① 总开关关(PF_LOC_USE_SCAN_CACHE)
+//     ② 没检查过 / 检查中途抛错(ready)
+//     ③ 换了文档(doc 引用不同)
+//     ④ 这张卡在检查轮是**关**的 —— 检查端一个属性都没读, 池子是空的。
+//        没有这道闸, 用户"在设置里刚开了卡⑥、没重新检查就点定位"会拿到"没找到"，
+//        而旧版此时是能找到的 ⇒ 会被当成"定位坏了"。
+//     ⑤ 隐藏池溢出或藏了符号实例(hidCut) —— 无法保证完整, 交回旧路径。
+function pfLocFromScan(doc, n, sub, out) {
+  if (!PF_LOC_USE_SCAN_CACHE) return false;
+  var s = PF_LOC_SCAN;
+  if (!s || !s.ready) return false;
+  try { if (s.doc !== doc) return false; } catch (eD) { return false; }
+  var ck = s.ck;
+  if (!ck) return false;
+  // ③④ 不进缓存(见「扫描缓存」一节末); ⑨ 走 c9
+  if (n !== 5 && n !== 6 && n !== 7 && n !== 9) return false;
+  if (n === 5 && !ck.rs) return false;
+  if (n === 6 && !ck.ik) return false;
+  if (n === 7 && !ck.ov) return false;
+  if (n === 9 && !ck.tx) return false;
+  if (s.hidCut) return false;
+
+  if (n === 9) {
+    // 卡⑨: pfJunkEach 本就含隐藏/锁定对象 ⇒ c9 已是完整集合, 不必再补隐藏池
+    var c9 = s.c9;
+    for (var i9 = 0; i9 < c9.length; i9++) out.push(c9[i9]);
+    return true;
+  }
+
+  if (n === 6) {
+    var k = sub || "";
+    if (k === "over" || k === "heavy" || k === "light" || k === "thin") {
+      var a6 = s.c6[k];
+      for (var i6 = 0; i6 < a6.length; i6++) out.push(a6[i6]);
+    } else {
+      // 并集(卡头旧入口): 四个池跨池去重 —— 同一对象可能既超标又色版极浅
+      var keys = ["over", "heavy", "light", "thin"];
+      for (var ki = 0; ki < keys.length; ki++) {
+        var ak = s.c6[keys[ki]];
+        for (var ai = 0; ai < ak.length; ai++) pfLocPush(out, ak[ai]);
+      }
+    }
+  } else {
+    var pool = (n === 5) ? s.c5 : s.c7;
+    for (var p = 0; p < pool.length; p++) pfLocPush(out, pool[p]);
+  }
+
+  // 隐藏池补判 —— 检查端对隐藏内容一个属性都没读, 这批只能在这里按同一套判据过一遍。
+  var hid = s.hid;
+  if (hid && hid.length) {
+    var mat = pfLocMatchFor(n, sub);
+    if (!mat) return false;
+    for (var h = 0; h < hid.length; h++) {
+      var hi = hid[h], htn = "";
+      try { htn = hi.typename; } catch (eH) { continue; }
+      var okH = false;
+      try { okH = mat(hi, htn); } catch (eH2) { okH = false; }
+      if (okH) pfLocPush(out, hi);
+    }
+  }
+  return true;
+}
+
+// 按卡号收集该卡的问题对象
+//   3 字体·转曲   4 图片嵌入   5 图片分辨率
+//   6 油墨·描边   7 叠印       9 清理
+// v11.53: 第 4 参 sub 只对卡⑥ 有意义(over/heavy/light/thin) —— 块内按钮各选各的。
+//   传空 = 卡⑥ 四块并集, 与 v11.52 口径一致。
+function pfLocCollect(doc, n, out, sub) {
+  // v11.81: 先试检查轮的扫描缓存(见文件末尾「扫描缓存」一节)。命中就到此为止 ——
+  //   ⑥⑦⑨ 原本要全树递归 1~4 秒, 现在只是把数组拷出来。
+  if (pfLocFromScan(doc, n, sub, out)) return;
+
+  // 卡⑨ 直接复用清理遍历 —— 它已含"剪切组内单点/未上色对象不动"的保护判定
+  if (n === 9) {
+    pfJunkEach(doc, function (kind, it) { out.push(it); });
+    return;
+  }
+  // v11.44: ③④⑤ 改成"直接取文档级专类集合", 不再遍历整棵树。
+  //   雪糕: "现在这个字体转曲这块选择起来会有点慢"。
+  //   慢的原因: 卡③ 只要 TextFrame, 却先走 pfLocGather 把文档里**每一个对象**的 typename
+  //   读一遍(实测稿子里 3000+ 路径对象), 跨桥读几千次只为挑出几十个文本框。
+  //   doc.textFrames / placedItems / rasterItems 是文档级集合, 本身含组内对象;
+  //   数量比"全部页面项"小一两个数量级 ⇒ 跨桥次数跟着降下来。
+  //   ⚠ ⑥⑦ **保持树递归**: 它们要 pathItems(3000+) + compoundPathItems + textFrames,
+  //     三个集合逐个按下标索引反而更慢 —— v11.33 实测集合索引 476ms vs 树递归 7.9ms。
+  if (n === 3) {
+    // 未转曲的必然还是 TextFrame(转曲后已变 Path/Group)
+    pfLocTake(doc, "textFrames", out, null);
+    return;
+  }
+  if (n === 4) {
+    // v11.85: 「非 CMYK 位图」段已移除, 卡④ 只剩卡头那枚按钮 —— 选未嵌入的链接图。
+    pfLocTake(doc, "placedItems", out, function (it) {
+      var em = false;
+      try { em = (it.embedded === true); } catch (e4a) { return false; }
+      return !em;
+    });
+    return;
+  }
+  if (n === 5) {
+    // 两个集合并集: rasterItems(位图) 与 placedItems(放置图)。
+    //   ⚠ 二者可能命中同一个对象, pfLocTake 内部按引用去重。
+    pfLocTake(doc, "rasterItems", out, function (it) {
+      return pfResoLow(pfPpiReal(it));
+    });
+    pfLocTake(doc, "placedItems", out, function (it) {
+      if (pfLocIsVec(it)) return false;
+      return pfResoLow(pfPpiReal(it));
+    });
+    return;
+  }
+  var match = pfLocMatchFor(n, sub);
   if (!match) return;
   pfLocGather(doc.layers, 0, out, match);
 }

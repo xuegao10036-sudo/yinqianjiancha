@@ -1,6 +1,6 @@
 # 印前检查-雪糕
 
-当前版本 **v11.80** · 完整变更日志见 [更新日志.txt](更新日志.txt) · 许可 [MIT](LICENSE)
+当前版本 **v11.86** · 完整变更日志见 [更新日志.txt](更新日志.txt) · 许可 [MIT](LICENSE)
 
 在 Illustrator 里做印前自检的面板扩展，装好后在 `窗口 → 扩展功能 → 印前检查-雪糕` 打开。  
 八张检查卡覆盖画板与出血 / 隐藏内容 / 字体 / 图片 / 油墨与描边 / 叠印 / 清理 / 色板，  
@@ -338,9 +338,13 @@
 **环境要求**：Windows；Illustrator **23（CC 2019）及以上**。清单里写的是 17.0，但扩展同时要求  
 CEP 9（CSXS 9），实际下限约为 AI 23 —— 更早版本装上了也未必出现在菜单里。
 
-1. **关闭 Illustrator**
-2. **双击 `windows一键安装.bat`**
-3. **重启 Illustrator** → 菜单 `窗口 → 扩展功能 → 印前检查-雪糕`
+先下载并解压压缩包（**不要在压缩包里直接双击运行**）。
+
+① **关闭 Illustrator**  
+② **双击 `windows一键安装.bat`**  
+③ **重启 Illustrator** → 菜单 `窗口 → 扩展功能 → 印前检查-雪糕`
+
+> 若弹出 SmartScreen「Windows 已保护你的电脑」，点「更多信息 → 仍要运行」。这是未签名脚本的正常提示。
 
 **以后要更新**：直接**再双击一次 `windows一键安装.bat`** 就行 —— 它会先清掉旧的  
 `CSXS / css / js / jsx / images` 五个子目录再整个拷回来，所以改过名、删过的文件不会残留  
@@ -355,17 +359,34 @@ CEP 9（CSXS 9），实际下限约为 AI 23 —— 更早版本装上了也未�
 ## 安装（macOS）
 
 **环境要求**：macOS；Illustrator 23（CC 2019）及以上。  
-⚠ macOS 版脚本**未经真机验证**，遇到问题请提 Issue。
+⚠ macOS 版脚本的复制与校验逻辑已在 v11.86 与 Windows 版对齐，但仍在收集真机反馈；遇到问题请提 Issue。
 
-1. 下载并解压（不要在压缩包里直接双击脚本）
-2. **终端**里进入解压后的文件夹，执行：`bash mac一键安装.command`  
-   （也可双击 `mac一键安装.command`；若系统拦截，到「系统设置 → 隐私与安全性」点「仍要打开」）
-3. **重启 Illustrator** → 菜单 `窗口 → 扩展功能 → 印前检查-雪糕`
+先下载并解压压缩包（**不要在压缩包里直接运行脚本**）。
 
-脚本做三件事：复制 `CSXS / css / js / jsx / images` 与 `index.html` 到  
-`~/Library/Application Support/Adobe/CEP/extensions/yinqianjiancha`、  
+① **关闭 Illustrator**  
+② 打开**终端**，进入解压后的文件夹，执行 `bash mac-install.command`  
+③ **重启 Illustrator** → 菜单 `窗口 → 扩展功能 → 印前检查-雪糕`
+
+> 第 ② 步**第一次必须在终端里跑**，双击不行（原因见下）。跑过一次之后双击也能用；
+> 装过旧版也直接跑，脚本会先清掉旧副本。
+
+> **为什么第一次必须在终端里跑**：从 GitHub 下载的 ZIP，每个条目都是 `os=DOS`、外部属性为 `0`，
+> 也就是**根本不携带 POSIX 权限位**——仓库里把文件存成 `755` 也没用，解压出来一律是 `644`，
+> 双击就会报「文件无法执行，因为你没有正确的访问权限」。
+> 脚本开头会自己 `chmod +x` 并清掉下载带来的 `com.apple.quarantine`，所以**跑过一次之后双击就正常了**。
+> 脚本名另用纯 ASCII，是为了避开不同归档工具在中文名上的编码差异，别改回中文。
+
+脚本做四件事：清理改名前的旧目录（`com.workbuddy.ai.preflight`）、把 `CSXS / css / js / jsx / images`
+与 `index.html` 复制到 `~/Library/Application Support/Adobe/CEP/extensions/yinqianjiancha`
+（**先删旧的再复制**，不是覆盖——`cp` 遇到已存在的目录只会合并，新版删掉的文件会永久残留）、
 写入 CEP 调试开关（`defaults write com.adobe.CSXS.9~16 PlayerDebugMode 1`）、清偏好缓存（`killall cfprefsd`）。  
+装完会**回读** manifest 里的版本号与 `PlayerDebugMode`，对不上就报 FAILED 并 `exit 1`，不会假装成功。
 再跑一次即更新，与 Windows 同理。**卸载**：删除上面那个文件夹即可（访达或终端）。
+
+> **装完打开还是旧面板 / 菜单里有重复项**：说明 CEP 目录里还有别的副本。终端执行  
+> `ls ~/Library/Application\ Support/Adobe/CEP/extensions` —— 正常情况下只该有 `yinqianjiancha` 一个，  
+> 多出来的（尤其 `com.workbuddy.ai.preflight`）删掉再重启 Illustrator。
+> 脚本末尾会打印包内版本与已装版本，两者不一致就是没装进去。
 
 > **打开后是空白面板时**：先完全退出 Illustrator（Cmd+Q）再重开；仍空白，在终端执行  
 > `xattr -cr ~/Library/Application\ Support/Adobe/CEP/extensions/yinqianjiancha` 清掉下载带来的隔离属性，  
@@ -454,7 +475,7 @@ yinqianjiancha/
 ├─ CSXS/manifest.xml      CEP 扩展清单
 ├─ images/icon.png        扩展菜单图标（manifest 的 <Icons> 引用，透明底 PNG）
 ├─ windows一键安装.bat    安装 / 更新（覆盖面板文件，可重复执行）
-├─ mac一键安装.command    macOS 安装 / 更新（同上，未经真机验证）
+├─ mac-install.command    macOS 安装 / 更新（同上，未经真机验证；首次须 `bash` 运行，勿改名）
 ├─ windows一键卸载.bat    卸载
 ├─ README.md              本文件
 ├─ 更新日志.txt           完整变更日志

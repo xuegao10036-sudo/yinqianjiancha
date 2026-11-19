@@ -9,6 +9,15 @@
 #   ⚠ 改 .bat 请用 包装/_push.js 推（它会把 .bat 强制转 CRLF、并断言纯 ASCII 再上传）。
 *.bat  -text
 
+# .command（macOS 双击脚本）必须保住 LF —— 让 git 一个字节都别动。
+#   ⚠ 不要写成 text eol=lf：`eol=` 只在 clone/checkout 时转换，网页 Download ZIP 不转换，
+#     仓库里存什么就是什么；写 -text 才是"两边都别碰"，行为最没有歧义。
+#   ⚠ 一旦被转成 CRLF，mac 上会报 `bad interpreter: /bin/bash^M`，症状和权限报错完全不同。
+#   ⚠ 执行位（755）不由 .gitattributes 决定 —— 它在树条目的 mode 里，由 包装/_push.js 的
+#     modeOf() 按扩展名给。两边都要对，缺一个双击就跑不起来。
+*.command -text
+*.sh      -text
+
 *.js   text eol=lf
 *.jsx  text eol=lf
 *.css  text eol=lf
