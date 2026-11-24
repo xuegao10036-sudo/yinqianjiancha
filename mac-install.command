@@ -17,6 +17,17 @@ set -u
 xattr -d com.apple.quarantine "$0" 2>/dev/null || true
 
 SRC="$(cd "$(dirname "$0")" && pwd)"
+# 3) v11.95: clear quarantine on the shipped payload (NOT on $SRC itself -- if the
+#    user unpacked straight into ~/Downloads, -cr on the folder would strip the
+#    Gatekeeper mark from every unrelated download too). Files copied out of a
+#    downloaded ZIP keep com.apple.quarantine, and CEP refuses to load an extension
+#    whose files carry it -> panel comes up blank with no error at all (that is the
+#    "mac blank panel" symptom we never got to the bottom of). Clear it first, so
+#    everything copied below is already clean.
+for _p in "$SRC/mac-install.command" "$SRC/CSXS" "$SRC/css" "$SRC/js" "$SRC/jsx" \
+          "$SRC/images" "$SRC/index.html"; do
+  if [ -e "$_p" ]; then xattr -cr "$_p" 2>/dev/null || true; fi
+done
 CEP="$HOME/Library/Application Support/Adobe/CEP/extensions"
 DEST="$CEP/yinqianjiancha"
 LEGACY="$CEP/com.workbuddy.ai.preflight"

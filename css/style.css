@@ -74,7 +74,7 @@ button, input { font-family: inherit; }
   z-index: 10;
 }
 /* v10.15: 版本号挪到名称下面 —— 两行纵排 */
-/* v10.39(审查 B7): 去掉 font-size:14px / font-weight:600(两个子元素 .tname / .ver 各自声明
+/* v10.39: 去掉 font-size:14px / font-weight:600(两个子元素 .tname / .ver 各自声明
    11px/400, 已无继承者 ⇒ 死属性), 并删 `.title svg { flex: none; }`(index.html 唯一的 svg
    在齿轮按钮里、不在 .title 内, 该规则从未匹配到任何元素)。 */
 .title { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; line-height: 1.3; }
@@ -146,6 +146,7 @@ button, input { font-family: inherit; }
 .btn-action:hover { background: #e64444; }
 .btn-action:disabled { background: #777; cursor: default; }
 
+
 .action-row { margin-top: 8px; }
 
 /* 转曲前的图层处理选项(复选框) */
@@ -215,14 +216,8 @@ label.chk input[type="checkbox"] {
 }
 /* 成功提示(黑底绿边) */
 .notice {
-  /* v11.1: 同 .error, 左右 12 -> 15 */
-  /* v11.36: 同 .error —— 下边距 10 -> 0(上下各 10, 对称) */
-  /* v11.44: 文档流 -> **底部固定浮层** —— 雪糕: "选中定位后的提示框在最上面, 我还需要滚上去才能看到"。
-     面板是纵向长列表, 操作点在下方, 提示必须在视口内。顺手解决另一个老问题:
-     原实现插在 topbar 与 #results 之间, 出现时会把整页内容往下推 ~56px。
-     ⚠ 不再参与文档流 ⇒ margin 归零, 位置由 left/right/bottom 决定。
-     ⚠ .notice 与 .error 互斥显示, 共用同一位置, 两者必须保持一致。
-     ⚠ v11.36 那条"上下各 10 对称"的口径作废 —— 不在文档流里就没有边距可谈。 */
+  /* 与 .error 完全同构 —— 位置 / 间距 / 圆角 / 字号全部一致, 只有颜色不同。
+     位置与间距的来龙去脉见 .error; ⚠ 两者互斥显示、共用同一位置, 改一个必须同步另一个。 */
   position: fixed;
   left: 15px;
   right: 15px;
@@ -256,6 +251,12 @@ label.chk input[type="checkbox"] {
   padding: 20px 20px;
   min-width: 280px;
   max-width: 86%;
+  /* v11.90: 设置弹层的行数随卡片数增长(十卡 = 10 行开关 + 7 行阈值), 面板高度不足时
+     .modal-mask 是 flex 居中且没有 overflow ⇒ 上下两端会被直接裁掉, 用户看不到"确认"。
+     这里给弹层自己一条上限 + 内部滚动: 内容再多也只是弹层内滚, 不会顶出视口。
+     ⚠ 只影响"超高"这一种情况 —— 普通确认框(两三行)永远碰不到这条。 */
+  max-height: calc(100% - 24px);
+  overflow-y: auto;
   box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6);
 }
 .modal-title {
@@ -426,6 +427,18 @@ label.chk input[type="checkbox"] {
 .th-in::-webkit-inner-spin-button,
 .th-in::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
 .th-unit { width: 26px; flex: none; color: #b6b6b6; font-size: 11px; }
+
+/* v11.87: 卡⑨ 专色描边的「描边宽」一行(zhiban v0.9.x 同款结构) ——
+   左侧标签 + 输入框 + 单位 + 一句换算提示; 窄面板下允许折行(wrap)。
+   ⚠ .trap-in 必须写在 .th-in 之后: 两者同优先级, 靠**顺序**覆盖 width(74 -> 66)。 */
+.trap-row {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: 6px 0 2px; font-size: 12px; color: #d8d8d8;
+}
+.trap-lb { flex: none; }
+/* v11.87: 56px 而不是 66 —— 66 + 提示文案会把这一行顶成两行(卡片内容宽只有 240px)。 */
+.trap-in { width: 56px; flex: none; text-align: left; }
+.trap-eq { color: #a8a8a8; font-size: 11px; }
 /* v11.1: 同 .set-sub, 补左右 10px —— 与 .th-row / .set-row 的左右内边距对齐 */
 .set-hint { color: #9c9c9c; font-size: 11px; margin-bottom: 15px; padding: 0 10px; }
 
@@ -770,7 +783,7 @@ ul.list li.kv2 .vl { flex: 0 0 auto; white-space: nowrap; }
    竖向尺寸经 v10.25~v10.27 三轮压到**总高 21px**(容器 padding 匀给块, 不是加高容器):
    与徽标齐平 ⇒ 卡头高度不变。⚠ 圆角只用 999px 胶囊, 不引入新 border-radius 值。 */
 /* v10.31: 叠印卡名 + 滑块同排 —— 卡名可省略让位, 滑块 flex:none 恒可见 */
-/* v10.33: 加 :not(.ovp-seg) (审查 v10.32 第 9 条) —— 原选择器把叠印行的 .ovp-seg(也是直接子 span)
+/* v10.33: 加 :not(.ovp-seg)  —— 原选择器把叠印行的 .ovp-seg(也是直接子 span)
    一并命中; 那三个属性对 inline-flex 无效, 当前无视觉副作用, 但语义不精确, 收窄后意图明确。 */
 .set-ck > span:not(.ovp-seg) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ovp-seg { display: inline-flex; margin-left: 6px; padding: 0; background: #232323; border: 1px solid #4a4a4a; border-radius: 999px; flex-shrink: 0; vertical-align: middle; }
