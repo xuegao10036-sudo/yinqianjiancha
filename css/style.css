@@ -750,6 +750,34 @@ ul.list li.kv2 .vl { flex: 0 0 auto; white-space: nowrap; }
 .foot .fpath { display: block; color: #9c9c9c; font-size: 12px; line-height: 20px; margin-top: 2px; }
 .foot .fbuild { display: block; color: #9c9c9c; font-size: 12px; line-height: 20px; margin-top: 2px; }
 
+/* v12.4(雪糕): 页脚「耗时」改成**点击展开**的常驻行, 明细不再挂原生 title。
+   起因: 截图发人时一按 Alt tooltip 就消失, 且原生 tooltip 由系统绘制、多数截图工具抓不到。
+   ⚠ 结构: .foot-ms(外层, 显示"耗时 X s" + 箭头) 与 .fms-detail(明细)**互为兄弟**,
+     不是父子 —— 明细靠 nextElementSibling 取(假 DOM 无 querySelector), 样式也按兄弟写。
+   ⚠ 展开状态不记忆(雪糕选"不记住") ⇒ 这里只管样式, 不加任何 localStorage。 */
+.foot-ms { cursor: pointer; user-select: none; display: inline-flex; align-items: center; column-gap: 6px; }
+/* 箭头: 收起朝右, 展开朝下(靠 data-pf-open 属性翻转, 不用 class)。
+   尺寸写死 10×6 并给 flex:none, 免得被 flex 压扁 */
+.fms-arw { width: 10px; height: 6px; flex: none; color: #7a7a7a; transition: transform .12s ease; }
+.foot-ms[data-pf-open="1"] .fms-arw { transform: rotate(90deg); }
+.foot-ms:hover { color: #d6d6d6; }
+.foot-ms:hover .fms-arw { color: #d6d6d6; }
+/* 明细: 独占整行 ⇒ 需要 block 级; 各段用 inline-block 折行。
+   ⚠ hidden 必须 !important —— .foot .fbuild 与 .fms-detail 都显式写了 display,
+     作者样式会盖掉 UA 的 [hidden]{display:none}。 */
+.fms-detail[hidden] { display: none !important; }
+.foot .fms-detail {
+  display: block; margin-top: 2px; color: #9c9c9c;
+  font-size: 12px; line-height: 20px; word-break: break-all;
+}
+/* 每段一个小片, 「段名 值」不拆开; 段间用间距分隔。0.0s 的段照样显示(排除法用得上) */
+.fms-seg { display: inline-block; white-space: nowrap; margin-right: 10px; }
+.fms-seg:last-child { margin-right: 0; }
+/* 键盘可达: Tab 到耗时行时给个可见焦点环。
+   ⚠ 不写 border-radius —— 全站圆角只许 6/10/15/999 四档(bt10.1 守着), 为焦点环新增
+     第 5 档不值得。直角焦点环在本尺寸下看不出来, 视觉无差。 */
+.foot-ms:focus-visible { outline: 1px solid #888; outline-offset: 2px; }
+
 .hidden { display: none; }
 /* v11.75(雪糕选 A): 样本名单默认只显示 cap 条, 其余行带 hidden, 由卡内「展开全部」放开。
    ⚠ [hidden] 必须 !important —— .ink-tbl li 与 ul.list li.kv2 都显式写了 display:flex,

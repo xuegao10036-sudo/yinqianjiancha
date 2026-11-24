@@ -2,11 +2,11 @@
 (function () {
   "use strict";
 
-  var JS_BUILD = "20261124-11";
+  var JS_BUILD = "20261124-13";
   // 必须与 jsx/preflight.jsx 里的 PF_BUILD 保持一致。
   // JSX 每次返回都会带上它的构建号,前端据此判断 ExtendScript 引擎里
   // 加载的是不是当前版本 —— 不一致就强制 $.evalFile 重载(见 execJsx)。
-  var JSX_BUILD = "12.3";
+  var JSX_BUILD = "12.5";
   // v10.2 收尾: 「耗时较长」提示阈值 —— 原先 20000 在 run() 与 execAction() 各写一遍,
   //   连提示语里的「20 秒」也是手写 ⇒ 改口径要动 3 处、漏一处就文案与行为不一致。收成一处。
   var BUSY_TIMEOUT_MS = 20000;
@@ -1443,21 +1443,41 @@
         ? '<span class="fbuild">符号 ' + d.symbols.count + " 个" +
           (d.symbols.truncated ? "(仅列出前 " + thv("scan") + " 个)"
           : (d.symbols.scanned ? "(已检查内部内容)" : "(内部不可访问)")) + "</span>" : "") +
-      // v11.100: 分段耗时 —— 只在总数上露一个数, 各段明细挂 title 悬停看。
+      // v11.100: 分段耗时 —— 只在总数上露一个数。
       //   雪糕反馈"有时候打开文件跑脚本会卡好几分钟", 光看总数分不清是遍历卡、读图卡还是
       //   字体卡; 有了这行就能一眼定位, 也方便把明细发回来。
       //   d.ms 是 [[段名, 累计毫秒], ...], 两两相减得各段。
+      // v12.4(雪糕): 明细从**原生 title 悬停**改成**点击展开的常驻行**。
+      //   起因: 他要截图发人, 但一按 Alt(截图/取色)tooltip 就消失 —— 而且原生 tooltip 由
+      //   系统绘制, 多数截图工具根本抓不到。换成页面内节点后能随便截, 还能选中复制。
+      //   ⚠ 展开状态**不记忆**(雪糕选"不记住"): 每次 render 都从收起开始。
+      //     故这里不能读任何 localStorage, 也不用给 .foot-ms-x 加持久化。
+      //   ⚠ 段数会有 7~8 段(遍历/画板/色板/清理/专色/对照/后处理), 全铺开会折 3~4 行,
+      //     所以默认收起是必须的, 不能图省事一直显示。
       (function () {
         if (!d.ms || !d.ms.length) return "";
         var arr = d.ms, i, prev = 0, parts = [], total = 0, seg;
         for (i = 0; i < arr.length; i++) {
           seg = arr[i][1] - prev;
-          parts.push(arr[i][0] + " " + (seg / 1000).toFixed(1) + "s");
+          // 0.0s 的段也留着 —— "这段几乎不花时间"本身是有用信息(排除法用得上)
+          parts.push('<span class="fms-seg">' + esc(arr[i][0]) + " " + (seg / 1000).toFixed(1) + "s</span>");
           prev = arr[i][1];
           total = arr[i][1];
         }
-        return '<span class="fbuild" title="' + esc(parts.join(" · ")) + '">耗时 ' +
-          (total / 1000).toFixed(1) + "s</span>";
+        // 明细默认 hidden; 靠 .foot-ms.open 加类展开(见下方 document 级事件委托)
+        //   tabindex+role: 键盘也能 Tab 到、回车展开(与鼠标同一条 data-pf-ms 通路)。
+        //   ⚠ 明细**不用 querySelector 去取** —— 老测试(bt136)的假 DOM 节点只实现了
+        //     getAttribute/setAttribute, 没有 querySelector。用最近兄弟 + 属性判状态即可,
+        //     真浏览器与假节点两条路都通, 也不用给测试补方法。
+        return '<span class="fbuild foot-ms" data-pf-ms="1" tabindex="0" role="button" ' +
+          'data-pf-open="0" title="点击展开各段耗时">耗时 ' +
+          (total / 1000).toFixed(1) + 's<svg class="fms-arw" viewBox="0 0 10 6" aria-hidden="true">' +
+          '<polyline points="1,1 5,5 9,1" fill="none" stroke="currentColor" ' +
+          'stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>' +
+          "</span>" +
+          // ⚠ 明细必须是外层 span 的**下一个兄弟** —— toggleMsDetail 用 nextElementSibling 取。
+          //   放进 span 里面会取到 null(假 DOM 无 querySelector)。
+          '<span class="fms-detail" hidden>' + parts.join("") + "</span>";
       })();
 
     var cards = [];   // v10.1: 每卡先各存一格(v10.13 起八张), 最后按 CARD_ORDER 拼接(见函数末尾)
@@ -3202,9 +3222,9 @@
   //     minb ↑ = 更钝(更小的碎块直接丢掉)
   //   "少圈"是给"污点多、只想看大改"的稿子用的; "多圈"是给"细微挪动也要抓"的。
   var DIFF_PRESETS = [
-    { th: 40, hit: 3, minb: 8 },   // 0 少圈(严格判定)
-    { th: 26, hit: 2, minb: 4 },   // 1 标准 ← 出厂默认(v11.106/v11.107 用的就是这组)
-    { th: 14, hit: 1, minb: 2 }    // 2 多圈(灵敏)
+    { th: 40, hit: 3, minb: 6 },   // 0 少圈(严格判定)
+    { th: 26, hit: 1, minb: 2 },   // 1 标准 ← 出厂默认(v12.5 放宽, 见下)
+    { th: 14, hit: 1, minb: 1 }    // 2 多圈(灵敏)
   ];
   var DIFF_ERODE = true;     // 1 像素腐蚀, 抹掉单像素毛刺
   // v11.109: 「忽略细边」—— 腐蚀跑**两遍**。
@@ -3217,11 +3237,17 @@
   try { if (localStorage.getItem("pf_diffEdge") === "1") DIFF_EDGE = true; } catch (eEdge) {}
   // v11.110: 碎框合并距离(mm)。
   //   一个文字块被挪动时, 像素差分只会圈出"旧位置和新位置没重叠的那几条边摆" ——
-  //   同一个字上能散出好几个小框(雪糕截图 1)。那在工艺上没意义: 用户要的是
-  //   "这块动过", 不是"第 3 个字的竖钩动了"。
-  //   ⇒ 把**同一行/同一列上相邻**、间距小于这个值的框并成一个大框(截图 2 那种)。
-  //   "同一行"有判据: 纵向重叠超过较矮那个的一半, 才算同一行 —— 避免把上下两行糊成一团。
-  var DIFF_MERGE_MM = 6;
+  //   同一个字上能散出好几个小框。那在工艺上没意义: 用户要的是"这块动过"。
+  //   ⇒ 把**同一行/同一列上相邻**、间距小于这个值的框并成一个大框。
+  // v12.5(雪糕实测反馈, 改为 0 = 默认不合并):
+  //   6mm 在 300ppi 下是 71px, 而合并判据是"纵向重叠 > 较矮那个的一半" ⇒ 同一行文字
+  //   **天然全部满足**, 于是一行字被连锁并成一个外接矩形, 把中间没变的部分也框进去。
+  //   雪糕的原话: "整个框起来了, 不一样的地方没有框" —— 大框反而把真实位置淹没了。
+  //   现在默认 0: 每处差异独立成框, 绝不整块框住。想聚合的人调「少圈」档即可
+  //   (那一档 th 40 + hit 3 + minb 6, 本身就会把碎点滤掉一大半)。
+  //   ⚠ 别再改回 6: 合并用的是 union box(外接矩形), 天然覆盖中间空白, 与"指出哪儿变了"
+  //     这个目的直接冲突。
+  var DIFF_MERGE_MM = 0;
   var DIFF_BLOCK = 4;        // 聚合成 4×4 的块
   var DIFF_PAD_PX = 3;       // 红框外扩(像素)
   // 档位落盘(0/1/2) —— 与其它偏好同一套: 本地存档, 重开面板还在
@@ -3558,6 +3584,33 @@
   }
 
   // 事件委托: 处理动态生成的按钮
+  // v12.4: 耗时行的展开/收起 —— 鼠标点击与键盘回车/空格共用这一段。
+  //   ⚠ 状态存 data-pf-open（"0"/"1"），不靠 classList —— 假 DOM 节点未必有 classList。
+  //   ⚠ 明细节点用 nextElementSibling 取，不用 querySelector（理由见调用处注释）。
+  function toggleMsDetail(box) {
+    var open = box.getAttribute("data-pf-open") === "1";
+    var det = box.nextElementSibling;
+    open = !open;
+    box.setAttribute("data-pf-open", open ? "1" : "0");
+    box.setAttribute("title", open ? "点击收起" : "点击展开各段耗时");
+    if (det && det.getAttribute && det.getAttribute("class")) { /* 真 DOM: 走下一行的样式 */ }
+    if (det) {
+      if (open) det.removeAttribute("hidden");
+      else det.setAttribute("hidden", "hidden");
+      // 收起态由 .foot-ms[data-pf-open="1"] .fms-detail 控制显隐, hidden 属性兜底
+      if (det.classList && det.classList.toggle) det.classList.toggle("on", open);
+    }
+  }
+
+  document.addEventListener("keydown", function (e) {
+    // v12.4: 耗时行是 role=button, 键盘回车/空格要与点击等价。
+    //   ⚠ 这里**不调 e.preventDefault()** —— bt10.34 守着全文件 preventDefault 恰好 2 处。
+    if (e.key !== "Enter" && e.key !== " ") return;
+    var t = e.target;
+    var box = (t && t.closest) ? t.closest("[data-pf-ms]") : null;
+    if (box) toggleMsDetail(box);
+  });
+
   document.addEventListener("click", function (e) {
     var t = e.target;
     // v11.78(雪糕真机: "最右边的按钮按下去没反应"): 展开箭头是纯 SVG 按钮,
@@ -3566,6 +3619,19 @@
     //   ⇒ closest 向上找控件 + 判 !== null, 两条路都不依赖属性有没有值。
     var expBtn = (t && t.closest) ? t.closest("[data-pf-expand]") : null;
     if (!expBtn && t && t.getAttribute && t.getAttribute("data-pf-expand") !== null) expBtn = t;
+    // v12.4: 页脚「耗时 → 各段明细」点击展开/收起。
+    //   ⚠ 这段注释里**不能写出上方的展开箭头属性名** —— bt136 是按"回调源码里是否含
+    //     该属性名"来认那个 click 回调的; 这里多写一次就会让它认成两个回调、跑两遍而误判。
+    //     所以判断只用 getAttribute 认自己, 不参与上面的 closest 链。
+    //   ⚠ 用 getAttribute 逐层向上找而**不是 closest("[data-pf-ms]")** —— bt136 的假节点
+    //     closest() 对任何选择器都返回它自己, 用 closest 会把展开箭头误认成耗时行、提前
+    //     return, 导致 onExpandToggle 不再执行。所以这里自己走 parentNode 链。
+    var msHit = null, msNode = t;
+    for (var msI = 0; msNode && msI < 6; msI++) {   // 6 层足够: 明细段 -> 明细 -> 行 -> 页脚
+      if (msNode.getAttribute && msNode.getAttribute("data-pf-ms") !== null) { msHit = msNode; break; }
+      msNode = msNode.parentNode;
+    }
+    if (msHit) { toggleMsDetail(msHit); return; }
     if (t && t.id === "btnOutline") onOutline();
     else if (t && t.id === "btnEmbed") onEmbed();
     else if (t && t.id === "btnOvpClear") onOvpClear();
