@@ -251,7 +251,7 @@ label.chk input[type="checkbox"] {
   padding: 20px 20px;
   min-width: 280px;
   max-width: 86%;
-  /* v11.90: 设置弹层的行数随卡片数增长(十卡 = 10 行开关 + 7 行阈值), 面板高度不足时
+  /* v11.90: 设置弹层的行数随卡片数增长(十卡 = 10 行开关 + 8 行阈值), 面板高度不足时
      .modal-mask 是 flex 居中且没有 overflow ⇒ 上下两端会被直接裁掉, 用户看不到"确认"。
      这里给弹层自己一条上限 + 内部滚动: 内容再多也只是弹层内滚, 不会顶出视口。
      ⚠ 只影响"超高"这一种情况 —— 普通确认框(两三行)永远碰不到这条。 */
@@ -408,7 +408,7 @@ label.chk input[type="checkbox"] {
    要加回请先改 main.js 的 dragMove 逻辑 —— 只补 CSS 等于加一段永不生效的样式。 */
 
 /* v10.1: 阈值输入区 —— 单位列固定 26px 且**每行都生成**(空单位也给空 span),
-   这样 flex space-between 下输入框的左右边界 7 行完全对齐。 */
+   这样 flex space-between 下输入框的左右边界各行完全对齐。 */
 .set-th { display: flex; flex-direction: column; gap: 2px; margin-bottom: 10px; }
 .th-row {
   display: flex; align-items: center; justify-content: space-between; gap: 8px;
@@ -440,6 +440,10 @@ label.chk input[type="checkbox"] {
 .trap-in { width: 56px; flex: none; text-align: left; }
 .trap-eq { color: #a8a8a8; font-size: 11px; }
 /* v11.1: 同 .set-sub, 补左右 10px —— 与 .th-row / .set-row 的左右内边距对齐 */
+/* v12.15: ⚠ 设置弹层里那句「改动后点「确认」保存，点「关闭」放弃」已按雪糕要求删掉，
+   本类目前**没有使用者**。规则仍然留着 —— 它是「弹层内文字左沿要对齐复选框」这条基准的
+   落地（bt62 / bt98 都把这里的 padding: 0 10px 当基准断言），删了会让那两条失去锚点。
+   将来若弹层要加说明文字，直接用它即可，别新造一个类。 */
 .set-hint { color: #9c9c9c; font-size: 11px; margin-bottom: 15px; padding: 0 10px; }
 
 /* v10.0: 已关闭的占位卡 —— 整卡降透明度、标题转灰、徽标用中性灰 */

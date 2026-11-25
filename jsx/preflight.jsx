@@ -71,7 +71,7 @@ function pfStringify(value) {
 // v10.60: 颜色收集深度上限 20->64 与主扫描统一; pfThCopy 补 htCap;
 //   __pfUsedCache 两处失效点(进 pfClearUnusedSwatches 即清 + pfClearUnusedGradPattern 读完即清)
 // v11.2: 全站胶囊按钮统一 40px 高(纯面板 CSS 改动, ExtendScript 逻辑零变化), 仅同步版本号
-var PF_BUILD = "12.5";
+var PF_BUILD = "12.15";
 
 // v10.46: 颜色收集的**轮内**复用缓存。
 //   onClearSwatches 用 execActionMulti 串联 pfClearUnusedSwatches + pfClearUnusedGradPattern,
@@ -97,6 +97,11 @@ var PF_TH_DEF = {
   light: 5,      // CMYK 某分量 0<值<此值 判色值极浅      <- 原 LIGHT_CH
   inkOk: 220,    // 油墨总量达此值算偏重(黄)             <- 原 INK_OK
   inkWarn: 300,  // 油墨总量超过此值算超标(红)           <- 原 INK_WARN
+  // v12.14(雪糕选 C): 四色黑判断线提成可调项, 默认 330(原写死 320)。
+  //   320 那条线只管「要不要报出来」, 330 这条管「能不能安全地一键转单黑」, 职责不同。
+  //   ⚠ 与 inkOk 绑定一条不变量: rbSum 必须 > inkOk, 否则整张稿子都会被转单黑
+  //     (见 pfThApply 末尾的回落)。
+  rbSum: 330,    // C+M+Y+K 之和达此值判四色黑(可转单黑)
   reso: 300,     // 图片有效分辨率低于此值(ppi)判偏低    <- 原 RESO_MIN
   cap: 5,        // 面板默认显示的样本条数(名单采集上限见 PF_SAMPLE_MAX)
   scan: 3000,    // 每类对象最多扫描数量(防大卡死)       <- 原 MAX_SCAN
@@ -195,8 +200,8 @@ var RESO_TOL_PCT = 0.005;
 //   拿到 undefined ⇒ 补上, 让"浅拷贝 == 全字段"这条语义成立(新加字段不再被漏掉)。
 function pfThCopy(t) {
   return { bleed: t.bleed, tiny: t.tiny, thin: t.thin, light: t.light,
-           inkOk: t.inkOk, inkWarn: t.inkWarn, reso: t.reso, cap: t.cap, scan: t.scan,
-           htCap: t.htCap };
+           inkOk: t.inkOk, inkWarn: t.inkWarn, rbSum: t.rbSum, reso: t.reso,
+           cap: t.cap, scan: t.scan, htCap: t.htCap };
 }
 // 面板首次打开设置时向 jsx 要默认值 —— 只回默认值, 不碰文档、不扫描
 function pfThDefaults() {
@@ -215,7 +220,11 @@ function pfThDefaults() {
 //   提成模块级常量 —— 原先每轮 check 都在函数内新建一次数组, 属可省的分配。
 // v11.5: 末尾追加 "light"(色版极浅阈值) —— 原先它只能在 PF_TH_DEF 里改, 面板设置不到。
 //   位置必须与 main.js 的 TH_KEYS 一致(light 在末位), 否则当场错位。
-var PF_TH_KEYS = ["bleed", "reso", "thin", "tiny", "inkOk", "inkWarn", "light"];
+// v12.14: 再追加 "rbSum"(四色黑判断线) —— 同样接在末位, 线序前缀升 "v3"。
+//   ⚠ **旧线序必须留着**: CEP 缓存里可能还是上一版 main.js, 它发的是 "v2|…" 七项;
+//     若只认 v3, 用户存过的阈值会整列**静默**回落默认。PF_TH_KEYS_V2 就是那份七项线序。
+var PF_TH_KEYS = ["bleed", "reso", "thin", "tiny", "inkOk", "inkWarn", "light", "rbSum"];
+var PF_TH_KEYS_V2 = ["bleed", "reso", "thin", "tiny", "inkOk", "inkWarn", "light"];
 
 function pfThApply(s) {
   var t = pfThCopy(PF_TH_DEF);
@@ -224,21 +233,35 @@ function pfThApply(s) {
   var i, v;
   // v11.5: 新线序带 "v2" 前缀(与 main.js thWire 同源) —— 加了字段后字段数不再能区分新旧
   //   (新 7 项 / v10.1 旧 7 项都是 7)。无前缀的旧面板(6 项)按旧口径读不进, 逐项回落默认。
-  var off = (parts[0] === "v2") ? 1 : 0;
-  var n = parts.length - off;
+  // v12.14: 三套线序并存 —— v3(8 项) / v2(7 项) / 无前缀(6 或 7 项, 按 v2 读)。
+  var off = 0, ks = PF_TH_KEYS_V2, hit = false, n = 0;
+  if (parts[0] === "v3") {
+    off = 1; ks = PF_TH_KEYS; n = parts.length - off; hit = (n === PF_TH_KEYS.length);
+  } else if (parts[0] === "v2") {
+    off = 1; ks = PF_TH_KEYS_V2; n = parts.length - off; hit = (n === PF_TH_KEYS_V2.length);
+  } else {
+    ks = PF_TH_KEYS_V2; n = parts.length;
+    hit = (n === PF_TH_KEYS_V2.length || n === PF_TH_KEYS_V2.length - 1);
+  }
   // v10.9: 字段校验收进 if —— 工作副本赋值无条件执行, 字段数不符时 t 即全默认。
   // v11.5: 额外放行"无前缀 6 项"(旧面板线序) —— 万一 CEP 缓存里还是旧 main.js,
   //   阈值照旧生效(light 回落默认), 而不是整列静默回默认。多余项读到 undefined ⇒ NaN ⇒ 跳过。
-  if (n === PF_TH_KEYS.length || (off === 0 && n === PF_TH_KEYS.length - 1)) {
-    for (i = 0; i < PF_TH_KEYS.length; i++) {
+  if (hit) {
+    for (i = 0; i < ks.length; i++) {
       v = parseFloat(parts[i + off]);
-      if (!isNaN(v) && isFinite(v) && v > 0) t[PF_TH_KEYS[i]] = v;
+      if (!isNaN(v) && isFinite(v) && v > 0) t[ks[i]] = v;
     }
+    // v10.33: 不变量 inkOk < inkWarn
     if (t.inkWarn <= t.inkOk) t.inkWarn = Math.max(t.inkOk + 1, PF_TH_DEF.inkWarn);
+    // v12.14: 四色黑判断线必须高于"偏重线", 否则整张稿子都会被判四色黑、一键转成单黑。
+    //   坏值**回落默认**(与其它项"填 0 = 用默认"同一口径), 不静默蹭到 inkOk+1 ——
+    //   蹭出来的数字用户没见过, 面板回填时会显得莫名其妙。
+    if (!(t.rbSum > t.inkOk)) t.rbSum = PF_TH_DEF.rbSum;
   }
   BLEED_MIN_MM = t.bleed; RESO_MIN = t.reso; THIN_STROKE_MM = t.thin;
   TINY_PT = t.tiny;
   INK_OK = t.inkOk; INK_WARN = t.inkWarn; LIGHT_CH = t.light;
+  PF_RB_SUM = t.rbSum;      // v12.14: 判断线随设置走(原先写死 320)
   return t;
 }
 
@@ -414,10 +437,10 @@ function pfOvpInfoDesc(c) {
 }
 
 // ============================================================
-// v11.91: 四色黑(C/M/Y/K 四通道均 >= 80%)判定
+// v11.91: 四色黑判定
 //   规则来源: 自动制版 CONFIG.richBlackThreshold(甲方 2026-08-21 定"四通道均 >=80%")。
-//   现行口径(v11.117): **每通道 >=80 且 累计 >=320** —— 与甲方口径方向一致, 只是多加一道
-//   总墨量闸门; C80/M80/Y80/K80(=320) 命中。
+//   现行口径(v12.12, 雪糕 2026-11-25): **只看四通道之和 >= 320**, 逐通道的 80% 下限已取消。
+//     "只要四者之和 >=320 就行了" —— C80/M80/Y80/K80(=320) 与 C100/M100/Y100/K20(=320) 同样命中。
 //   ⚠ 三处必须与自动制版 Step4 同口径, 否则同一份稿两个面板给出不同结论:
 //     ① **全局 Process 色**在 DOM 里是 SpotColor 壳(spot.colorType === ColorModel.PROCESS),
 //        要按 tint 折算成实际 CMYK 才能判; 真专色(ColorModel.SPOT)一律不参与
@@ -426,17 +449,12 @@ function pfOvpInfoDesc(c) {
 //        而"单黑"判定仍走上面既有的 pfIsK100Raw(C/M/Y<1 且 K>=100), 这里不另立一套。
 //     ③ 复合路径 / 裁切路径由调用方逐对象传入, 本函数只管颜色本身。
 //   ⇒ 白名单式: 只认 CMYKColor 与 Process 壳, 其余(Gray/RGB/专色/渐变/图案)一律 null。
-//   ⚠ 历史: v11.95 ~ v11.116 曾是严格大于(80/80/80/80 不转), v11.117 按雪糕要求改回含等号。
-// v11.117(雪糕): 门槛回到「**每通道 >=80 且 累计 >=320**」—— 即 **>= 而不是 >**。
-//   雪糕 2026-11-24: "只有cmyk400才出现按钮, 我要的是cmyk320, 每个80以上, 就要出现按钮"。
-//   ⚠ v11.95 ~ v11.116 这里是严格大于, 结果 C80/M80/Y80/K80(正好 320) 不出按钮,
-//     用户从 400 往下试时看到"只有 400 才出现", 直接理解为"没做"。
-//     当初改成严格大于的理由是"避免把刚好卡线的深灰黑转成单黑" —— 那是我自己的判断,
-//     雪糕现在明确要求卡到 320 就出, 按他的口径走。
-//   ⚠ 改回 >= 后,"每通道 >=80"成立时累计必然 >=320, 累计这条在数学上冗余 ——
-//     仍然保留: 将来若把 EACH 调低(比如 70), 累计闸门才是真正挡住"一放放到 280"的那道。
-var PF_RB_EACH = 80;
-var PF_RB_SUM = 320;
+//   ⚠ 历史: v11.95~v11.116 是严格大于(80/80/80/80 不转); v11.117 改回含等号并加了"每通道"闸;
+//     v12.12 把"每通道"整条取消; **v12.14 默认 320 -> 330**(雪糕选 C) —— 320 那一档
+//     恰好是 C100/M100/Y100/K20 这类三色富黑, 转成 K100 后由"四色叠深灰黑"变"纯黑"。
+//   🔴 本值现在是**可调的**: 真源在 PF_TH_DEF.rbSum, 由 pfThApply 覆盖(设置里那一行
+//     「四色黑合计达」)。真正参与判定的始终是这个变量, 不要在多处另写 330。
+var PF_RB_SUM = 330;
 
 // 取"实际印刷 CMYK": CMYKColor 原样返回; 全局 Process 色按 底色 × tint 折算; 其余 null
 function pfEffCMYK(c) {
@@ -455,8 +473,9 @@ function pfEffCMYK(c) {
 }
 
 // 判四色黑: 命中 true, 否则 false。
-//   v11.117(雪糕): 每通道 **>=80** 且 累计 **>=320**(两处都**含等号**)。
-//     C80/M80/Y80/K80 = 320 现在**算四色黑**, 会出按钮。
+//   v12.12(雪糕): 收敛成**一道闸** —— 四通道之和 >= 320 即可, 逐通道下限取消。
+//   ⚠ 副作用(已知并接受): K 很浅的组合(如 C100/M100/Y100/K20)也会被转成 C0M0Y0K100,
+//     视觉上由"四色叠出的深灰黑"变成"纯黑" —— 这正是四色黑转单黑要解决的问题。
 //   v11.92(雪糕): 块里不再列样本 ⇒ 不再返回 desc, 只回布尔(与 pfIsK100Raw 同一种返回形态)。
 function pfRichBlackChk(c) {
   var cm = pfEffCMYK(c);
@@ -468,8 +487,7 @@ function pfRichBlackChk(c) {
     yl = Math.round(cm.yellow * 100) / 100;
     bk = Math.round(cm.black * 100) / 100;
   } catch (e) { return false; }
-  return (cy >= PF_RB_EACH && mg >= PF_RB_EACH && yl >= PF_RB_EACH && bk >= PF_RB_EACH &&
-          (cy + mg + yl + bk) >= PF_RB_SUM);
+  return (cy + mg + yl + bk) >= PF_RB_SUM;
 }
 
 // v10.32: 采样池内部去重键字段名 —— 提成模块级常量。
@@ -1572,8 +1590,15 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11) {
             try { rtx = pfInkLightBoth(fcTx); } catch (eTi) { rtx = { total: -1, type: "mixed", desc: "混合颜色" }; }
           }
           if (rtx) inkBucket(black.text, rtx, getSnip(), "填充");
-          // v11.91: 四色黑(文字侧只判填充 —— 与上面 inkBucket 同口径, 见 black.richBlack 注释)
+          // v11.91: 四色黑(文字侧填充)
           if (fcTx && pfRichBlackChk(fcTx)) black.richBlack.count++;
+          // v12.12(雪糕: "文字描边也判断可以么"): 文字描边同判。
+          //   原来只判填充, 但文字一样可以带四色黑描边, 转单黑时那圈描边也该一起转,
+          //   否则"报 N 转不到 N"。读法与 fillColor 完全一致(characterAttributes),
+          //   混合属性读不到就当没有 —— 宁可不报, 不可误报。
+          var scTx = null;
+          try { scTx = ca.strokeColor; } catch (eScT) { scTx = null; }
+          if (scTx && pfRichBlackChk(scTx)) black.richBlack.count++;
           // v11.81: 卡⑥ 入缓存（文字侧只判填充色 —— 与定位端 match 的文字口径一致，
           //   描边与"描边<0.1mm"块文字永不参与）。阈值同源：total > INK_WARN / ≥ INK_OK。
           if (PF_LOC_SCAN && rtx) {
@@ -2864,9 +2889,9 @@ function pfClearOverprint(unlockAll) {
         var sIt = sis[si];
         if (uAll) unlocked += pfUnlockItem(sIt);
         if (pfBlockInfo(sIt)) { skipped++; continue; }   // 隐藏/锁定实例: 跳过(与检查端口径一致)
-        var sDef = null; try { sDef = sIt.symbol; } catch (eSd) {}
-        var sSrc = null;
-        if (sDef) { try { sSrc = sDef.item; } catch (eSs) {} if (!sSrc) { try { sSrc = sDef; } catch (eSs2) {} } }
+        // v12.7: 顶层实例的下钻同样走 pfSymSource —— v11.39 抽出来时只改了内层 kIt,
+        //   这四处顶层循环各留了一份手抄, 等于"抽了一半"。口径与手抄版逐字一致。
+        var sSrc = pfSymSource(sIt);
         if (sSrc && sSrc.pageItems) pfClrOvpIn(sSrc, 0);
       }
     } catch (eSym) {}
@@ -2997,9 +3022,7 @@ function pfOutlineAll(showAll, unlockAll) {
           try { infoS = pfBlockInfo(sItO); } catch (e2s) {}
         }
         if (infoS) { skipped++; continue; }
-        var sDefO = null; try { sDefO = sItO.symbol; } catch (eSdO) {}
-        var sSrcO = null;
-        if (sDefO) { try { sSrcO = sDefO.item; } catch (eSsO) {} if (!sSrcO) { try { sSrcO = sDefO; } catch (eSsO2) {} } }
+        var sSrcO = pfSymSource(sItO);   // v12.7: 同 pfClearOverprint, 统一到 pfSymSource
         if (sSrcO && sSrcO.pageItems) pfOutlineInSym(sSrcO, 0);
       }
     } catch (eSymO) {}
@@ -3262,9 +3285,7 @@ function pfOverprintRule(mode, lockFirst) {
         var sItR = sisR[siR];
         if (lf) unlocked += pfUnlockItem(sItR);
         if (pfBlockInfo(sItR)) { skipped++; continue; }
-        var sDefR = null; try { sDefR = sItR.symbol; } catch (eSdR) {}
-        var sSrcR = null;
-        if (sDefR) { try { sSrcR = sDefR.item; } catch (eSsR) {} if (!sSrcR) { try { sSrcR = sDefR; } catch (eSsR2) {} } }
+        var sSrcR = pfSymSource(sItR);   // v12.7: 同 pfClearOverprint, 统一到 pfSymSource
         if (sSrcR && sSrcR.pageItems) pfRuleInSym(sSrcR, 0);
       }
     } catch (eSymR) {}
@@ -3350,17 +3371,31 @@ function pfRichBlackToK100(lockFirst) {
       if (pfBlockInfo(tf)) { skipped++; return; }
       try {
         var ca = tf.textRange.characterAttributes;
+        // v12.12(雪糕: "文字描边也判断可以么"): 填充与描边**各判各改**。
+        //   原实现是 `if (!fc || !pfRichBlackChk(fc)) return;` —— 填充不是四色黑就整帧早退,
+        //   描边永远没机会被处理, 于是"检查端报了描边、动作端转不到"。
         var fc = null;
         try { fc = ca.fillColor; } catch (eFc) {}
-        if (!fc || !pfRichBlackChk(fc)) return;
-        try {
-          // v11.93: 只写颜色 —— 叠印一个都不碰(见函数头)
-          ca.fillColor = k100();
-        } catch (eW) { failed++; return; }
-        // 核验: 颜色确为单黑
-        var nf = null;
-        try { nf = ca.fillColor; } catch (eV1) {}
-        if (pfIsK100Raw(nf)) acted++; else failed++;
+        if (fc && pfRichBlackChk(fc)) {
+          try {
+            // v11.93: 只写颜色 —— 叠印一个都不碰(见函数头)
+            ca.fillColor = k100();
+            // 核验: 颜色确为单黑
+            var nf = null;
+            try { nf = ca.fillColor; } catch (eV1) {}
+            if (pfIsK100Raw(nf)) acted++; else failed++;
+          } catch (eW) { failed++; }
+        }
+        var scT = null;
+        try { scT = ca.strokeColor; } catch (eScT) {}
+        if (scT && pfRichBlackChk(scT)) {
+          try {
+            ca.strokeColor = k100();
+            var nsT = null;
+            try { nsT = ca.strokeColor; } catch (eV6) {}
+            if (pfIsK100Raw(nsT)) acted++; else failed++;
+          } catch (eWs) { failed++; }
+        }
       } catch (eT) { failed++; }
     }
     try {
@@ -3427,16 +3462,14 @@ function pfRichBlackToK100(lockFirst) {
         var sIt = sis[si];
         if (lf) unlocked += pfUnlockItem(sIt);
         if (pfBlockInfo(sIt)) { skipped++; continue; }
-        var sDef = null; try { sDef = sIt.symbol; } catch (eSd) {}
-        var sSrc = null;
-        if (sDef) { try { sSrc = sDef.item; } catch (eSs) {} if (!sSrc) { try { sSrc = sDef; } catch (eSs2) {} } }
+        var sSrc = pfSymSource(sIt);   // v12.7: 同 pfClearOverprint, 统一到 pfSymSource
         if (sSrc && sSrc.pageItems) convInSym(sSrc, 0);
       }
     } catch (eSym) {}
 
     res.ok = true;
     res.acted = acted; res.skipped = skipped; res.failed = failed; res.unlocked = unlocked;
-    res.message = (acted > 0 ? "四色黑已转单黑 " + acted + " 处（C0 M0 Y0 K100，叠印状态未改动）" : "未发现四色黑（四通道均 >=" + PF_RB_EACH + "% 且累计 >=" + PF_RB_SUM + "%）") +
+    res.message = (acted > 0 ? "四色黑已转单黑 " + acted + " 处（C0 M0 Y0 K100，叠印状态未改动）" : "未发现四色黑（四通道之和 >=" + PF_RB_SUM + "%）") +
       (lf && unlocked > 0 ? "，解除锁定 " + unlocked + " 处" : "") +
       (skipped > 0 ? "，跳过 " + skipped + " 处（锁定/隐藏，状态未改动）" : "") +
       (failed > 0 ? "，失败 " + failed + " 处（写入后核验未通过，请人工检查）" : "") + "。";
@@ -3535,6 +3568,12 @@ function pfIsNoInkSpot(c) {
 }
 
 // 填充色分类: "spot" 专色 / "white" 白色(不上墨) / "cmyk" 四色 / "other" 渐变图案等
+//   ⚠ v12.13(雪糕 2026-11-25 "问题11.25.ai" 真机实测): **灰度 0% 与 RGB 纯白也是"白"**。
+//     旧实现把 GrayColor / RGBColor 一律归 "other" ⇒ 灰白色块既不进参照池、也**不承担遮挡**
+//     ⇒ 压在它上面的四色/专色照样被判成"贴着底下的专色" ⇒ 二维码被白底托着却加了描边。
+//     那份稿子里两块白底都是 GrayColor(gray=0)(不是 C0M0Y0K0), 正是踩在这条上。
+//     灰 0 与 RGB 255/255/255 在视觉与制版上都等同于纸白, 必须与 C0M0Y0K0 同待遇。
+//     ⚠ 只认"真的不上墨"的: 灰 1% 以上、RGB 不到纯白, 仍然归 "other" 不参与(不做过度扩张)。
 function pfFillKind(c) {
   if (!c) return "other";
   var t = "";
@@ -3547,7 +3586,44 @@ function pfFillKind(c) {
     } catch (e2) {}
     return "cmyk";
   }
-  return "other";   // 渐变 / 图案 / RGB / 灰度 / 无填充
+  if (t === "GrayColor") {                     // v12.13: 灰 0% = 纸白
+    try { if (Math.abs(c.gray) < 0.01) return "white"; } catch (e3) {}
+    return "other";
+  }
+  if (t === "RGBColor") {                      // v12.13: RGB 纯白 = 纸白
+    try { if (c.red >= 254 && c.green >= 254 && c.blue >= 254) return "white"; } catch (e4) {}
+    return "other";
+  }
+  return "other";   // 渐变 / 图案 / 灰度(非 0) / RGB(非纯白) / 无填充
+}
+
+// v12.13(雪糕 2026-11-25 真机实测): **复合路径读不到自身的 filled / fillColor**
+//   (AI 28.0.0 上 CompoundPathItem 的 filled / strokeWidth / strokeColor 全读成 undefined)。
+//   后果比想象中严重 —— 旧代码在 pfTrapCollect 里 `filled === true` 取假就 return, 于是
+//   复合路径**从来没进过参照池**:
+//     · 转曲后的文字(那份稿子的「精选大豆油」= 5 个复合路径)一个描边都加不上;
+//     · 二维码的定位角标(2 子路径的环)也从来加不上;
+//     · 它同样不能当遮挡物 / 邻居(这一条在复合路径上本来是空转, 因为多数复合路径没填色)。
+//   修法: 自身读不到就**回退到子路径** —— 复合路径的填色本来就存在 pathItems 上,
+//   与手动在 AI 里给复合路径上色是同一条路。只读第一个"有填色"的子路径, 不猜。
+//   返回 { on: 是否有填色, c: 填色(读不到为 null) }。
+function pfNodeFill(node) {
+  if (!node) return { on: false, c: null };
+  var on = false, c = null;
+  try { if (node.filled === true) on = true; } catch (e0) {}
+  try { var x = node.fillColor; if (x) c = x; } catch (e1) {}
+  if (on && c) return { on: true, c: c };
+  var subs = null;
+  try { subs = node.pathItems; } catch (e2) { subs = null; }
+  if (!subs) return { on: on, c: c };
+  var n = 0; try { n = subs.length; } catch (e3) { n = 0; }
+  for (var i = 0; i < n; i++) {
+    var sOn = false, sC = null;
+    try { if (subs[i].filled === true) sOn = true; } catch (e4) {}
+    try { var y = subs[i].fillColor; if (y) sC = y; } catch (e5) {}
+    if (sOn && sC) return { on: true, c: sC };
+  }
+  return { on: on, c: c };
 }
 
 // v11.96: 半强度地判"同一个颜色族" —— 只看**色板/四值**, 不要求 tint 完全相等。
@@ -3582,23 +3658,46 @@ function pfSameFamily(a, b) {
 //   雪糕 2026-11-23: "如果专色本身有其他颜色的描边，按按钮后不要把描边改成专色描边
 //   并叠印，只改没有描边的专色进行描边。"
 //   ⚠ 判"同族"而不是"完全相同"见 pfSameFamily 的说明: tint 不同仍是同一条陷印描边。
-function pfStrokeState(pi, fc) {
-  var sOn = false; try { sOn = (pi.stroked === true); } catch (e0) {}
+// v12.13: 只判**一个**目标对象的描边状态(不改任何属性) —— pfStrokeState 的内核。
+//   拆出来是因为复合路径要逐个看子路径(见下面 pfStrokeState 的说明)。
+function pfStrokeStateOf(t, fc) {
+  if (!t) return 0;
+  var sOn = false; try { sOn = (t.stroked === true); } catch (e0) { sOn = false; }
   if (!sOn) return 0;
-  var w = 0; try { w = pi.strokeWidth; } catch (e1) { w = 0; }
+  var w = 0; try { w = t.strokeWidth; } catch (e1) { w = 0; }
   if (!(typeof w === "number" && w > 0)) return 0;
-  var sc = null; try { sc = pi.strokeColor; } catch (e2) {}
+  var sc = null; try { sc = t.strokeColor; } catch (e2) { sc = null; }
   if (!sc) return 0;                     // 描边开着却读不到颜色 ⇒ 当没有处理(保守: 不去动它)
   try { return pfSameFamily(sc, fc) ? 1 : 2; } catch (e3) {}
   return 2;
 }
+function pfStrokeState(pi, fc) {
+  var st = pfStrokeStateOf(pi, fc);
+  if (st > 0) return st;
+  // v12.13: 复合路径自身读不到 stroked/strokeWidth/strokeColor(AI 28.0.0 实测)
+  //   ⇒ 回退到子路径: **任一**子路径有描边就算"有"。
+  //   不这么做的话, 转曲文字上原设计画好的描边会被当成"没描边", 再被面板盖一层。
+  var subs = null; try { subs = pi.pathItems; } catch (e4) { subs = null; }
+  if (!subs) return st;
+  var n = 0; try { n = subs.length; } catch (e5) { n = 0; }
+  for (var i = 0; i < n; i++) {
+    var s2 = pfStrokeStateOf(subs[i], fc);
+    if (s2 > 0) return s2;
+  }
+  return 0;
+}
 
 // 递归一个节点: 组往下钻, 文字单独回调(kind="text"), 路径交出去(kind="path")
-function pfSpotWalk(node, fn) {
+//   v12.6: 补深度闸 —— 全文件其余递归(主扫描/色板/清理/转曲/叠印)都有 PF_MAX_DEPTH,
+//     只有专色这一对没有, 是唯一的缺口。组嵌套异常深或层树损坏时, 这里会栈溢出。
+//     缺省(老调用点仍按两参)从 0 起算, 行为不变。
+function pfSpotWalk(node, fn, depth) {
+  if (depth === undefined) depth = 0;
+  if (depth > PF_MAX_DEPTH) return;
   var tn = ""; try { tn = node.typename; } catch (e0) { return; }
   if (tn === "GroupItem") {
     var its = null; try { its = node.pageItems; } catch (e1) { its = null; }
-    if (its) { var n = its.length; for (var i = 0; i < n; i++) pfSpotWalk(its[i], fn); }
+    if (its) { var n = its.length; for (var i = 0; i < n; i++) pfSpotWalk(its[i], fn, depth + 1); }
     return;
   }
   if (tn === "TextFrame") { fn(null, "text"); return; }
@@ -3606,13 +3705,16 @@ function pfSpotWalk(node, fn) {
 }
 
 // 递归一个图层(含子图层) —— 注意 layer.pageItems **不含**子图层内容, 必须分开递归
-function pfSpotWalkLayer(ly, fn) {
+//   ⚠ 图层嵌套与对象组嵌套**分开计数**(各 64): 层内对象重新从 0 起算, 与原来一致。
+function pfSpotWalkLayer(ly, fn, depth) {
+  if (depth === undefined) depth = 0;
+  if (depth > PF_MAX_DEPTH) return;
   // v11.90: 对照层不参与专色统计 —— 栅格即使带着专色信息, 也不该被算成"需要陷印的图元"。
   if (pfIsAuxLayer(ly)) return;
   var its = null; try { its = ly.pageItems; } catch (e0) { its = null; }
-  if (its) { var n = its.length; for (var i = 0; i < n; i++) pfSpotWalk(its[i], fn); }
+  if (its) { var n = its.length; for (var i = 0; i < n; i++) pfSpotWalk(its[i], fn, 0); }
   var subs = null; try { subs = ly.layers; } catch (e1) { subs = null; }
-  if (subs) { var m = subs.length; for (var j = 0; j < m; j++) pfSpotWalkLayer(subs[j], fn); }
+  if (subs) { var m = subs.length; for (var j = 0; j < m; j++) pfSpotWalkLayer(subs[j], fn, depth + 1); }
 }
 
 // 收集文档里所有"参与陷印"的填充图元(含 bbox) —— 统计与执行共用
@@ -3625,9 +3727,11 @@ function pfTrapCollect(doc) {
   function onNode(node, kind) {
     if (kind === "text") { out.textSkipped++; return; }
     if (out.items.length >= CAP) { out.capped = true; return; }
-    var fOn = false; try { fOn = (node.filled === true); } catch (e1) {}
-    if (!fOn) return;
-    var fc = null; try { fc = node.fillColor; } catch (e2) {}
+    // v12.13: 用 pfNodeFill 而不是直接读 node.filled —— 复合路径的 filled/fillColor
+    //   在 AI 28.0.0 上读不到, 直读会把**转曲文字**整体漏掉(见 pfNodeFill 的说明)。
+    var fo = pfNodeFill(node);
+    if (!fo.on) return;
+    var fc = fo.c;
     var k = pfFillKind(fc);
     if (k === "other") return;
     var b = null; try { b = node.geometricBounds; } catch (e3) {}
@@ -3725,6 +3829,15 @@ var PF_OCC_SPAN_MAX = 400;    // 两个图元之间夹了超过这么多条 ⇒ 
 //   ⇒ 遮挡物必须与 A、B **都不是同一种墨**才算数。
 //   白块仍然算数(白=不上墨, 与两边都不同色), 所以条码那一单的修法不受影响。
 var PF_OCC_SAME_SKIP = true;
+// v12.13(雪糕 2026-11-25): **同一种墨的两个图元之间不算"需要陷印的相邻"**。
+//   起因: 二维码是一堆同色小色块拼的(那份稿子里 17 个 PathItem + 4 个复合路径, 全是
+//   PANTONE 368 C)。每块都"挨着"旁边那块同色块 ⇒ 白底把它们与绿底隔开的修法(见
+//   pfObstructed)对它们彼此无效 ⇒ 大白底上那枚专色二维码依然被加了一圈描边。
+//   物理上显而易见: 同一条色版上相邻的两块, 中间**不存在套印缝**, 加描边是纯负作用
+//   (描边会外扩, 把码点糊在一起)。与 v11.99 "同墨不算分隔" 是同一条道理的两面。
+//   ⚠ 只跳"同族"(同色板名 / 同四值, 见 pfSameFamily), 不同专色之间照旧要陷印。
+//   box 是手搓的(没有 fc)时无法比较 ⇒ 不跳, 保持旧行为。
+var PF_NEAR_SAME_SKIP = true;
 function pfSameInkEntry(x, y) {
   if (!x || !y) return false;
   if (!x.fc || !y.fc) return false;
@@ -3776,6 +3889,9 @@ function pfNearPeer(box, peers, tol, self, occ) {
   for (var i = 0; i < n; i++) {
     if (self && peers[i].it === self) continue;
     if (!pfBBoxNear(box, peers[i], tol)) continue;
+    // v12.13: 同一种墨 ⇒ 不算相邻(同色版上没有套印缝, 见 PF_NEAR_SAME_SKIP 的说明)。
+    //   手搓 box 没有 fc ⇒ pfSameInkEntry 返回 false ⇒ 保持旧行为。
+    if (PF_NEAR_SAME_SKIP && pfSameInkEntry(box, peers[i])) continue;
     if (occ && pfObstructed(box, peers[i], occ, tol)) continue;   // 被隔开 ⇒ 不算相邻
     return true;
   }
@@ -3812,7 +3928,7 @@ function pfSpotScan(doc) {
   st.spotTotal = spots.length;
   for (i = 0; i < spots.length; i++) {
     if (!pfNearPeer(spots[i], peers, PF_TRAP_TOL, spots[i].it, col.items)) { st.spotIdle++; continue; }
-    try { fc = spots[i].it.fillColor; } catch (e1) { fc = null; }
+    fc = spots[i].fc;      // v12.13: 用收集时存的那份 —— 复合路径的 it.fillColor 读出来是 null
     // v11.95(雪糕): 已有**同族**描边(比如自己那圈 3mm 专色描边)算「已加」, 但仍留在
     //   「需加」里 —— 表格「需加 / 已加 / 待加」三列才平账。执行端 pfTrapStrokeApply
     //   对这类对象只返回 kept, 一个属性都不改(见那里的说明)。
@@ -3827,7 +3943,7 @@ function pfSpotScan(doc) {
   }
   for (i = 0; i < cmyks.length; i++) {
     if (!pfNearPeer(cmyks[i], spots, PF_TRAP_TOL, cmyks[i].it, col.items)) continue;   // 四色的相邻源只认专色
-    try { fc = cmyks[i].it.fillColor; } catch (e2) { fc = null; }
+    fc = cmyks[i].fc;      // v12.13: 同上, 复合路径读不到自身 fillColor
     ss = fc ? pfStrokeState(cmyks[i].it, fc) : 0;
     if (ss === 2) { st.strokeKept++; continue; }     // 同上: 别的颜色的描边不动
     st.cmykAdj++;
@@ -3870,14 +3986,14 @@ function pfSpotSelectAll() {
       if (!pfNearPeer(spots[i], peers, PF_TRAP_TOL, spots[i].it, col.items)) { nIdle++; continue; }   // 只贴白/空白/被隔开
       // v11.96: 已有其他颜色描边的**不选** —— 执行端也不会动它, 选进选区只会让用户
       //   以为"这些也要改", 白担一次心跳。
-      try { fcP = spots[i].it.fillColor; } catch (eFp) { fcP = null; }
+      try { fcP = spots[i].fc; } catch (eFp) { fcP = null; }   // v12.13: 复合路径要用收集时那份
       ssP = fcP ? pfStrokeState(spots[i].it, fcP) : 0;
       if (ssP === 2) { nKept++; continue; }
       if (pick(spots[i])) nSpot++;
     }
     for (i = 0; i < cmyks.length; i++) {
       if (!pfNearPeer(cmyks[i], spots, PF_TRAP_TOL, cmyks[i].it, col.items)) continue;
-      try { fcP = cmyks[i].it.fillColor; } catch (eFc2) { fcP = null; }
+      try { fcP = cmyks[i].fc; } catch (eFc2) { fcP = null; }   // v12.13: 同上
       ssP = fcP ? pfStrokeState(cmyks[i].it, fcP) : 0;
       if (ssP === 2) { nKept++; continue; }
       if (pick(cmyks[i])) nCmyk++;
@@ -3954,13 +4070,34 @@ function pfTrapStrokeApply(pi, wPt, fc, k) {
   var stt = pfStrokeState(pi, fc);
   if (stt >= 1) { out.r = "kept"; return out; }   // 已有描边 ⇒ 原样保留, 一个属性都不碰
   // stt === 0: 本来没有描边 ⇒ 新建同色描边 + 叠印
-  try {
-    pi.stroked = true;
-    pi.strokeWidth = wPt;
-    pfTrapSetStrokeColor(pi, fc, k);
-    pi.strokeOverprint = true;
-    out.r = "acted";
-  } catch (e5) { out.r = "failed"; }
+  //   v12.13: 复合路径(转曲文字/角标环)的 stroked/strokeWidth/strokeColor 在 AI 28.0.0 上
+  //     **写不进自身**(属性根本不存在), 必须落到子路径上。原来那版是"没抛异常就当成功",
+  //     对复合路径会把一次彻底失败报成 acted。现在改成先定目标、逐个写、逐个核验:
+  //     目标 = 自身(可写时) 或 全部子路径(自身不可写时)。
+  var tg = [pi];
+  var selfOk = false;
+  try { selfOk = (typeof pi.stroked !== "undefined"); } catch (e0) { selfOk = false; }
+  if (!selfOk) {
+    var subs = null; try { subs = pi.pathItems; } catch (e1) { subs = null; }
+    var sn = 0; try { sn = subs ? subs.length : 0; } catch (e2) { sn = 0; }
+    if (sn > 0) { tg = []; for (var si = 0; si < sn; si++) tg.push(subs[si]); }
+  }
+  var anyOk = false, bad = 0, ti, tn = tg.length;
+  for (ti = 0; ti < tn; ti++) {
+    var t = tg[ti], threw = false;
+    try {
+      t.stroked = true;
+      t.strokeWidth = wPt;
+      pfTrapSetStrokeColor(t, fc, k);
+      t.strokeOverprint = true;
+    } catch (e5) { threw = true; }
+    if (threw) { bad++; continue; }
+    // 核验: 1=写成同族描边 / -1=该类型读不回来(只能信写入) / 其余(0, 2)=没写进去
+    var v = -1;
+    try { v = pfStrokeStateOf(t, fc); } catch (e6) { v = -1; }
+    if (v === 1 || v === -1) anyOk = true; else bad++;
+  }
+  out.r = (bad === 0 && anyOk) ? "acted" : "failed";
   return out;
 }
 
@@ -4029,9 +4166,10 @@ function pfSpotTrap(strokeMM) {
     }
 
     function applyPath(pi) {
-      var fOn = false; try { fOn = (pi.filled === true); } catch (e1) {}
-      if (!fOn) return;
-      var fc = null; try { fc = pi.fillColor; } catch (e2) {}
+      // v12.13: 同 pfTrapCollect —— 复合路径(转曲文字/角标环)要靠 pfNodeFill 才读得出填色
+      var fo = pfNodeFill(pi);
+      if (!fo.on) return;
+      var fc = fo.c;
       var k = pfFillKind(fc);
       if (k === "white") { whiteSkip++; return; }          // C0M0Y0K0: 不加、也不当相邻源
       if (k === "other") { otherSkip++; return; }          // 渐变/图案/RGB/灰度
@@ -4254,15 +4392,11 @@ function pfJunkEach(doc, cb) {
   if (paths.length) {
     n = paths.length;
     for (i = 0; i < n; i++) {
-      var p = paths[i], tn = "", np = -1, gd = false, fl = true, st = true;
-      try { tn = p.typename; } catch (e2) { continue; }
-      if (tn !== "PathItem") continue;
-      // v11.21(外审 #9): 防御 —— doc.pathItems 若**包含复合路径的组件**, 那些组件的
-      //   filled/stroked 可能跟着整体走或为空, 单个删掉会破坏复合路径。组件一律交给
-      //   "复合路径整体"那一轮判定(下面第二个循环), 这里直接跳过。
-      //   ⚠ 若某版 AI 的 pathItems 本就不含组件, 这条判断永不成立, 无副作用。
-      //   v11.33: 枚举已换成树递归(不进入 CompoundPathItem), 组件根本不会出现在 paths
-      //   里 ⇒ 本判断恒不成立, 纯属防御, 保留不删(将来若改回集合枚举会立刻再用上)。
+      // v12.6: 不再重读 typename —— paths 已由 junkWalkItems 按 tn==="PathItem" 筛好,
+      //   这里那次读恒真, 纯粹是每条路径白付一次跨桥属性读(3374 条 = 3374 次)。
+      //   下面的 parP 判断**保留**: 它挡的是"将来改回集合枚举"时复合路径组件混进来
+      //   (v11.21 外审 #9 的防御), 与本次省掉的那次读不是同一件事。
+      var p = paths[i], np = -1, gd = false, fl = true, st = true;
       var parP = null;
       try { parP = p.parent; } catch (eP9) { parP = null; }
       var parPTn = "";
@@ -4594,6 +4728,46 @@ function pfPxSize(path) {
   return sz;
 }
 
+// v12.6: JPEG 的 SOF 补读 —— 4KB 内没扫到就按段头跳。
+//   只读每段 4 字节的头(FF xx len_hi len_lo), 段体用 seek 跳过:
+//   几十 KB 的 ICC/XMP 也只花一次 seek, 不把整个文件读进来。
+//   段序: SOI → APPn/COM… → SOF → DHT/DQT… → SOS(压缩数据)。SOF 必在 SOS 之前。
+function pfJpegSizeSeek(fp) {
+  var f = null;
+  try { f = new File(fp); } catch (e0) { return null; }
+  try { f.encoding = "BINARY"; } catch (e1) {}
+  var opened = false;
+  try { opened = f.open("r"); } catch (e2) { opened = false; }
+  if (!opened) return null;
+  var out = null, pos = 2, guard = 0;
+  try {
+    while (guard++ < 1024) {          // 段数上限: 防损坏文件里的死循环(JPEG 通常 <100 段)
+      try { f.seek(pos, 0); } catch (e3) { out = null; break; }
+      var bh = null;
+      try { bh = f.read(4); } catch (e4) { bh = null; }
+      if (!bh || bh.length < 4) { out = null; break; }
+      if (bh.charCodeAt(0) !== 0xFF) { pos++; continue; }   // 填充字节: 逐字节找标记
+      var mk = bh.charCodeAt(1);
+      if (mk >= 0xC0 && mk <= 0xC3) {                       // SOF0/1/2
+        try { f.seek(pos + 5, 0); } catch (e5) { out = null; break; }
+        var so = null;
+        try { so = f.read(4); } catch (e6) { so = null; }   // 高(2) + 宽(2)
+        if (!so || so.length < 4) { out = null; break; }
+        out = { w: pfU16be(so, 2), h: pfU16be(so, 0) };
+        break;
+      }
+      // 无长度字段的标记: SOI(D8) / EOI(D9) / RSTn(D0~D7) / TEM(01) —— 只前进 2 字节
+      if (mk === 0xD8 || mk === 0xD9 || mk === 0x01 || (mk >= 0xD0 && mk <= 0xD7)) { pos += 2; continue; }
+      if (mk === 0xDA) { out = null; break; }               // SOS 之后是压缩数据, SOF 不会再来
+      var segLen = pfU16be(bh, 2);
+      if (segLen < 2) { out = null; break; }
+      pos += 2 + segLen;
+    }
+  } catch (e7) { out = null; }
+  try { f.close(); } catch (e8) {}
+  return out;
+}
+
 function pfPxSizeRaw(fp) {
   var f = null, head = null;
   try { f = new File(fp); } catch (e1) { return null; }
@@ -4625,11 +4799,23 @@ function pfPxSizeRaw(fp) {
       if (mk >= 0xC0 && mk <= 0xC3) {
         return { w: pfU16be(head, ji + 7), h: pfU16be(head, ji + 5) };
       }
+      // v12.11: 与 pfJpegSizeSeek 的标记处理对齐 —— 下面这几类标记**没有长度字段**:
+      //   SOI(D8) / EOI(D9) / TEM(01) / RSTn(D0~D7)。原实现一律按"有长度"跳,
+      //   撞上它们会把紧随其后的两个字节当段长 ⇒ 段边界跳错 ⇒ 错过 SOF ⇒ 白付一次 seek。
+      //   ⚠ 只补这一条, 不采纳"遇 SOS(DA) 直接 return null": 那会把"因跳错而错过"
+      //     误判成"文件里没有 SOF", 退回 matrix ⇒ 300dpi 图报 72ppi(假低清, v12.6 刚修过)。
+      //     SOS 之后仍交给 pfJpegSizeSeek 重扫一次, 多一次 I/O 换零误报风险。
+      if (mk === 0xD8 || mk === 0xD9 || mk === 0x01 || (mk >= 0xD0 && mk <= 0xD7)) {
+        ji += 2; continue;
+      }
       var len = pfU16be(head, ji + 2);
       if (len < 2) break;
       ji += 2 + len;
     }
-    return null;
+    // v12.6: 4KB 内没找到 SOF ⇒ 按段 seek 补读(见 pfJpegSizeSeek)。
+    //   印前 JPEG 常带 APP2(CMYK ICC) / APP13(XMP), 单段几十 KB, SOF0 落在 4KB 之后。
+    //   旧实现直接返回 null ⇒ pfPpiReal 退回 matrix ⇒ 300dpi 图报 72ppi ⇒ 假低清误报。
+    return pfJpegSizeSeek(fp);
   }
   // TIFF: II*\0(小端) / MM\0*(大端), IFD 里 tag 256=宽, 257=高
   var isII = (head.charCodeAt(0) === 0x49 && head.charCodeAt(1) === 0x49);
@@ -5519,8 +5705,8 @@ function pfSnapScan(doc) {
         try { out.opacity = Math.round(Number(it.opacity)); } catch (e2) {}
         try {
           var b = it.geometricBounds;
-          out.wmm = Math.round((b[2] - b[0]) / MMPT * 10) / 10;
-          out.hmm = Math.round((b[1] - b[3]) / MMPT * 10) / 10;
+          out.wmm = pfRound((b[2] - b[0]) / MMPT);
+          out.hmm = pfRound((b[1] - b[3]) / MMPT);
         } catch (e3) {}
       }
     }
@@ -5726,8 +5912,8 @@ function pfSnapBuild(opacityPct) {
     res.opacity = op;
     res.count = src.length;
     res.rebuilt = rebuilt;
-    res.wmm = Math.round((area[2] - area[0]) / MMPT * 10) / 10;
-    res.hmm = Math.round((area[1] - area[3]) / MMPT * 10) / 10;
+    res.wmm = pfRound((area[2] - area[0]) / MMPT);
+    res.hmm = pfRound((area[1] - area[3]) / MMPT);
     res.artboard = abIdx + 1;
   } catch (err) {
     // 失败就把半成品清掉 —— 留一层空图层比失败更糟(下次会判"已存在")。

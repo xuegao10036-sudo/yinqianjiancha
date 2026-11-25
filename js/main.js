@@ -2,11 +2,11 @@
 (function () {
   "use strict";
 
-  var JS_BUILD = "20261124-13";
+  var JS_BUILD = "20261125-10";
   // 必须与 jsx/preflight.jsx 里的 PF_BUILD 保持一致。
   // JSX 每次返回都会带上它的构建号,前端据此判断 ExtendScript 引擎里
   // 加载的是不是当前版本 —— 不一致就强制 $.evalFile 重载(见 execJsx)。
-  var JSX_BUILD = "12.5";
+  var JSX_BUILD = "12.15";
   // v10.2 收尾: 「耗时较长」提示阈值 —— 原先 20000 在 run() 与 execAction() 各写一遍,
   //   连提示语里的「20 秒」也是手写 ⇒ 改口径要动 3 处、漏一处就文案与行为不一致。收成一处。
   var BUSY_TIMEOUT_MS = 20000;
@@ -211,10 +211,15 @@
   // v5.0: 新增 extraChip(可选)— 卡片右上角可并列第二个徽标(如卡1出血不足)
   // v10.39: 删掉第 7 参 headExtra —— 自 v10.29 叠印卡页签摘除后已**无任何调用点**传值,
   //   `(headExtra || '')` 恒为空串(逐字节等价)。历史上是 v10.14 给叠印卡 seg 用的。
-  function card(title, level, chipText, bodyHtml, chipLevel, extraChip, loc) {
+  function card(title, level, chipText, bodyHtml, chipLevel, extraChip, loc, tip) {
     // v11.42: 定位按钮从徽标**右侧**挪到**左侧**（雪糕要求）。放在 chip 之前即可 ——
     //   .chips 是 inline-flex + gap:6px，顺序决定左右，几何仍受 21×21 约束、卡头恒 37px。
-    return '<div class="card"><div class="card-head"><span>' + esc(title) + '</span>' +
+    // v12.8: 第 8 参 tip —— 整卡悬停提示。只给"空态一句话"的卡用（卡⑨ 无专色时），
+    //   把原先挤在正文里的适用范围挪到悬停，空态才能和其余七卡一样只占一行。
+    //   ⚠ 挂在**外层 .card** 而不是 .card-head: 卡头标题 span 的形态被测试逐字钉住，
+    //     且空态卡片很矮，悬停整张卡才符合直觉。内层元素自带 title 时浏览器优先用它。
+    return '<div class="card"' + (tip ? ' title="' + esc(tip) + '"' : "") +
+      '><div class="card-head"><span>' + esc(title) + '</span>' +
       "<span class='chips'>" +
       (loc ? locateBtn(loc) : "") +
       chip(chipLevel || level, chipText) + (extraChip ? extraChip : "") +
@@ -387,7 +392,9 @@
   // v10.2: 去掉「其中重度」(tinyBad) —— 字号只留一条判定(<tiny 直接标红)。
   // v11.5: 线序末尾追加 "light"(色版极浅阈值) —— 原先它只在 jsx 的 PF_TH_DEF 里、不可调。
   //   追加在**末位**是老数据的兼容前提: 旧 pf_th(6 项) 前六位含义不变, 第 7 位缺项 ⇒ 回落默认。
-  var TH_KEYS = ["bleed", "reso", "thin", "tiny", "inkOk", "inkWarn", "light"];
+  // v12.14: 末尾追加 "rbSum"(四色黑判断线) —— 与 jsx 的 PF_TH_KEYS 同序, 线序前缀升 "v3"。
+  var TH_KEYS = ["bleed", "reso", "thin", "tiny", "inkOk", "inkWarn", "light", "rbSum"];
+  var TH_KEYS_V2 = ["bleed", "reso", "thin", "tiny", "inkOk", "inkWarn", "light"];
   // ⚠ 老用户 localStorage 里的 pf_th 是 v10.1 的 7 项格式(含 tinyBad)。
   //   线序靠"字段数"区分: 7 项按旧线序读、6 项按新线序读 —— 否则会把 inkOk 当 tinyBad 用,
   //   判定拿错数字而且毫无提示(油墨阈值变成 5/220 ⇒ 满屏标红)。
@@ -415,10 +422,17 @@
     //   设置面板窄的时候多一行小字会把 7 行撑高, 所以宁可用悬停。
     //   要讲清的事: 这一项只管「报不报」, 四色黑转单黑另有一套固定口径, 不跟着这一项走。
     //   雪糕原话: "现在外面是检测油墨大于 300, 转单黑是 320。怎么优化合适?" → 选 A:
-    //   **不改阈值**(300 是检测线、320+每通道>=80% 是能否安全一键转单黑的判断线, 两者职责不同),
+    //   **不改阈值**(300 是检测线、320 是能否安全一键转单黑的判断线, 两者职责不同),
     //   只把区别写在文案里。
+    //   v12.12: 四色黑的判定简化为"C+M+Y+K 之和 >=N" —— 原来的"每通道 >=80%"已取消。
+    //   v12.14(雪糕选 C): N 提成可调项(下面那一行 rbSum), 默认由 320 抬到 330 ——
+    //     320 那一档恰好是 C100/M100/Y100/K20 这类三色富黑, 转单黑后由深灰黑变纯黑。
+    //   v12.15(雪糕): 行名改成与按钮**完全同名**「四色黑转单黑」—— 原来的「四色黑合计达」
+    //     只说清了判定口径, 看不出它就是那颗按钮的开关。设置行与按钮同名最省解释。
     { k: "inkWarn", label: "油墨总量超标",   unit: "",    step: "5",    min: "1",
-      hint: "这一项只管「要不要报出来」——改它只影响卡⑥ 的「油墨总量>N」那一块。四色黑转单黑另有一套固定口径「每通道 >=80% 且累计 >=320%」，不随这一项变化。" },
+      hint: "这一项只管「要不要报出来」——改它只影响卡⑥ 的「油墨总量>N」那一块。四色黑那条在下面单独一行，两条线各管各的、互不影响。" },
+    { k: "rbSum",   label: "四色黑转单黑",   unit: "%",   step: "5",    min: "1",
+      hint: "判四色黑的门槛，也是「四色黑转单黑」那颗按钮的开关：C+M+Y+K 之和达到这个值就会被转成 C0 M0 Y0 K100。默认 330 —— 刚好把 C100/M100/Y100/K20(=320) 这类三色富黑挡在门外，不让它变成纯黑。调到 300 会把纯 CMY 三色黑也转掉，视觉变化更明显。" },
     { k: "light",   label: "色版低于",       unit: "%",   step: "1",    min: "0.1"  },
     { k: "thin",    label: "描边细于",       unit: "mm",  step: "0.05", min: "0.01" }
   ];
@@ -429,9 +443,10 @@
     // v11.5: 线序第一次**加字段**(light) ⇒ 字段数已无法区分格式(新 7 项 / v10.1 旧 7 项撞车),
     //   故新格式带**非数字**前缀 "v2"(不能是 "2" —— 出血阈值可能正好是 2)。
     //   无前缀的旧数据照旧: 7 项 = v10.1(含 tinyBad, 该项在下面被跳过), 其余按现行线序。
-    if (p[0] === "v2") { off = 1; ks = TH_KEYS; }
+    if (p[0] === "v3") { off = 1; ks = TH_KEYS; }
+    else if (p[0] === "v2") { off = 1; ks = TH_KEYS_V2; }
     else if (p.length === TH_KEYS_V101.length) { ks = TH_KEYS_V101; }
-    else { ks = TH_KEYS; }
+    else { ks = TH_KEYS_V2; }   // v12.14: 无前缀的 6 项老数据按 v2 线序读(末位 rbSum 缺项)
     for (i = 0; i < ks.length; i++) {
       if (TH_KEYS.indexOf(ks[i]) < 0) continue;
       v = parseFloat(p[i + off]);
@@ -439,9 +454,11 @@
     }
     return any ? o : null;
   }
-  function thWire(o) {   // {..} -> "v2|3|300|..."; 缺项留空(jsx 侧回落默认)
+  function thWire(o) {   // {..} -> "v3|3|300|..."; 缺项留空(jsx 侧回落默认)
     if (!o) return "";
-    var a = ["v2"], i, v;   // v11.5: 格式版本前缀, 与 thParse / jsx pfThApply 同一口径
+    // v12.14: 前缀 v2 -> v3(线序加了第 8 项 rbSum)。与 thParse / jsx pfThApply 同一口径;
+    //   三处必须一起改, 否则面板发 v3 而 jsx 只认 v2 ⇒ 用户设置整列静默失效。
+    var a = ["v3"], i, v;
     for (i = 0; i < TH_KEYS.length; i++) {
       v = o[TH_KEYS[i]];
       a.push(v === undefined || v === null ? "" : v);
@@ -1926,6 +1943,17 @@
     if (missN > 0) iCand.push({ t: "缺失 " + missN + " 张", lv: "bad" });
     if (lowN > 0) iCand.push({ t: "偏低 " + lowN + " 张", lv: "warn" });
     if (rsIncomplete) iCand.push({ t: "未完成", lv: "warn" });
+    // v12.10(雪糕选 B): 「有链接图」不在 iCand 里(它是常态, 挂卡头是噪音) ⇒ 下面的
+    //   "首位相等才挂次位"对它永远不成立。后果: 有链接图且分辨率全清时, 主徽标是黄的
+    //   「有链接图」、iCand[0] 却是「全部达标」⇒ 两者不等 ⇒ 绿徽标被吞掉,
+    //   "虽然是链接图但分辨率都够"这个正面信号用户看不到。
+    //   ⇒ 只在"有链接 + 分辨率全清"这一种状态下把「有链接图」补成第 0 位,
+    //     次徽标便自然挂出绿色的「全部达标」。
+    //   ⚠ 不可无条件 push —— 那样"有链接 + 有低清"会多挂一颗黄「有链接图」,
+    //     正是上面"不报有链接图"那条注释要避免的噪音(bt130 的 #有链接不补 守着)。
+    if (missN === 0 && linkedN > 0 && lowN === 0 && !rsIncomplete && rs.total > 0) {
+      iCand.push({ t: "有链接图", lv: "warn" });
+    }
     if (missN === 0 && linkedN === 0 && embN > 0) iCand.push({ t: "全部嵌入", lv: "ok" });
     if (missN === 0 && rs.total > 0 && lowN === 0 && !rsIncomplete) iCand.push({ t: "全部达标", lv: "ok" });
     // ⚠ 比较点必须写 .t —— 候选改成对象之后, 写 iCand[0] === iChip 恒为假, 次徽标会整片消失。
@@ -2022,7 +2050,8 @@
     var light = d.black.light || { count: 0, samples: [] };
     var lightN = light.count || 0;
     var thinN = bp.thin || 0;
-    // v11.91: 四色黑(每通道 >=80% 且累计 >=320%, v11.117 起含等号)—— 本卡唯一带红色动作按钮的块。
+    // v11.91: 四色黑(v12.14 起只看四通道之和 >= 设置里的 rbSum, 默认 330)
+    //   —— 本卡唯一带红色动作按钮的块。
     //   ⚠ 旧 jsx(缓存里没有 richBlack 键)一律兜成 0 —— 否则 rb.count 读 undefined 会让
     //     "四色黑 0 个"的块凭空出现(undefined > 0 恒假, 但 rbN 传给 inkBlock 会显示 undefined)。
     //   v11.92: 只读 count —— 块里不再列样本(见下方说明), jsx 那边也跟着只留计数。
@@ -2098,10 +2127,10 @@
     // ===== v11.91: 四色黑 → 单黑 =====
     //   位置: 四个"只报告"的块之后、灰色汇总行之前 —— 这是本卡唯一带红色动作按钮的块,
     //   放最后才不会被夹在一堆名单中间误点。
-    //   口径: 每通道 >=80% 且累计 >=320%(jsx 的 PF_RB_EACH / PF_RB_SUM); 文字只算填充、
-    //   图形填充/描边都算 —— 与上面两个油墨总量块同源, 所以本块的对象一定也出现在那两块里。
+    //   口径(v12.14): 四通道之和 >= 设置里的「四色黑合计达」(默认 330, jsx 的 PF_RB_SUM);
+    //   文字填充与描边都算、图形填充/描边都算 —— 与上面两个油墨总量块同源。
     // v11.92(雪糕): **不列样本清单** —— 与上面「油墨总量>300」那张表是同一批对象
-    //   (累计 >320 必然 >300), 一屏里同一个东西列两遍。
+    //   (累计 >= rbSum 必然 > inkWarn 的默认值, 一屏里同一个东西列两遍)。
     // v11.93(雪糕): 标题行「四色黑 N 个」和那行灰字说明**也去掉** —— 卡头徽标已经写着
     //   「四色黑 N 个」, 块里再报一遍是第二次重复。块内只剩 勾选 + 按钮;
     //   数量与判定口径挂到按钮的 title 上(悬停可见), 不为它单独占行。
@@ -2116,14 +2145,13 @@
         '</div>' +
         // v11.114(雪糕选 A): title 里点明「四色黑」与上面「油墨总量>300」是**两条线** ——
         //   雪糕问过"为什么外面检测 >300、转单黑却按 >320"。答案是这两个数管的不是一件事:
-        //   300 是「要不要报给你看」的检测线(可在设置里改), 320 + 每通道 >=80% 是
-        //   「能不能安全地一键转单黑」的判断线(写死在 jsx 的 PF_RB_EACH / PF_RB_SUM)。
-        //   保持现状不改阈值, 只把区别写在悬停文案里, 让人自己看得明白。
-        //   ⚠ 这两个数字在这里是**硬编码**: 前端没有 PF_RB_EACH/PF_RB_SUM 的镜像。
-        //     将来若改 jsx 那两个常量, 这句文案必须同步(jsx 侧注释里已有互相提醒)。
-        '<button class="btn-action" id="btnRbK100" title="四色黑比上面的「油墨总量>' + thv("inkWarn") +
-        '」更严格：四个通道都要 >=80% 且累计 >=320%，所以只会转其中一部分。本按钮处理 ' + rbN +
-        ' 处填充/描边，转为 C0 M0 Y0 K100；只改颜色，不改叠印">四色黑转单黑</button>' +
+        //   300 是「要不要报给你看」的检测线, 另一个是「能不能安全地一键转单黑」的判断线。
+        // v12.14: 判断线提成可调项(rbSum, 默认 330) ⇒ 文案改成读 thv("rbSum")。
+        //   ⚠ **不要再硬编码这个数**: 前端现在有它的镜像(TH_KEYS 末位), 写死必然与设置又走散。
+        '<button class="btn-action" id="btnRbK100" title="与上面的「油墨总量>' + thv("inkWarn") +
+        '」是两条线：四色黑只看 C+M+Y+K 之和是否 >=' + thv("rbSum") +
+        '%，不看单个通道的深浅（这个数在设置里可改）。本按钮处理 ' + rbN +
+        ' 处填充/描边 (含文字描边)，转为 C0 M0 Y0 K100；只改颜色，不改叠印">四色黑转单黑</button>' +
         '</div>';
     }
 
@@ -2151,7 +2179,7 @@
     //     "油墨总量/描边/色版" 这三类可下手的问题(要不要计入得单独拍板)。
     var bCand = [];
     if (totalBad > 0) bCand.push(["bad", "超标 " + totalBad + " 处"]);
-    // v11.91: 四色黑排在超标之后、偏重之前 —— 它和超标常是同一批对象(总墨量 >=320),
+    // v11.91: 四色黑排在超标之后、偏重之前 —— 它和超标常是同一批对象(总墨量 >= rbSum),
     //   但"可以直接点一下修掉"比"偏重"更该被看见。两者都命中时徽标读作
     //   "超标 N 处 · 四色黑 M 处", 正好是"超标里有 M 处是四色黑"。
     // v11.94(审查): 单位由「个」改「处」—— 见上方四色黑块的注释(填充/描边各计一次)。
@@ -2210,7 +2238,11 @@
       //   "叠印 N 处" + 副徽标"白叠印 N 处" 两枚太长 ⇒ "叠印 N · 白 N" 一枚。
       //   危害说明不丢: 卡内汇总行"白色 N"仍带 title 悬停提示。
       // v10.36: 截断时数字加 "+" —— "叠印 8+" 一眼看出"不止这些"。
-      oChip = "叠印 " + ovpN + (ovpTrunc ? "+" : "") + (ovpW > 0 ? " · 白叠印 " + ovpW : "");
+      // v12.9: 主数补量词「处」—— 卡体写的是"共 N 处叠印", 徽标却写"叠印 N",
+      //   同一件事两种说法。副数保持「白叠印 N」不动: 那两个字是 v11.66 特意补的
+      //   (光写"白"看不出是白底叠印), 且再加一个"处"会让这枚徽标在 300px 下变挤。
+      oChip = "叠印 " + ovpN + (ovpTrunc ? "+" : "") + " 处" +
+        (ovpW > 0 ? " · 白叠印 " + ovpW : "");
       var oRows = (ovp.samples || []).map(function (s) {
         return { l: s.src === "text" ? "文字" : "图形", s: s };
       });
@@ -2464,7 +2496,7 @@
   //     (NaN 会让 if 恒假 ⇒ 静默空白, 与卡⑧/卡⑨ 同一个坑)。
   function renderCardSpotTrap(d, scanCk) {
     var stp = d.spotTrap || null;
-    var tHtml = "", tLevel = "ok", tChip = "无专色";
+    var tHtml = "", tLevel = "ok", tChip = "无专色", tTip = "";
     if (stp) {
       var tTotal = stp.spotTotal || 0;          // 专色填充图元总数(含只贴白的)
       var tNeed = stp.spot || 0;                // 其中需要加描边的(与四色或另一专色相邻)
@@ -2501,7 +2533,9 @@
       if (tTotal > 0) {
         if (tNeed > 0) {
           tLevel = tLeft > 0 ? "bad" : "ok";
-          tChip = tLeft > 0 ? "待加 " + tLeft : "已加完";
+          // v12.9: 补量词 —— 全站徽标口径是「名词 + 数字 + 量词」(隐藏 12 个 / 缺失 1 张 /
+          //   未使用 4 个), 只有这里写成"待加 3"。
+          tChip = tLeft > 0 ? "待加 " + tLeft + " 个" : "已加完";
           tHtml = '<ul class="sw-tbl">' +
             '<li class="sw-h"><span class="sw-nm"></span><b>需加</b><b>已加</b><b>待加</b></li>' +
             tRow("专色", tNeed, tNeedDone) +
@@ -2539,8 +2573,12 @@
             (tWhy.length ? "。" : "，全部只与白色块/空白相邻，按规则不加描边。") + "</div>";
         }
       } else {
-        tHtml = '<span class="dim">没有专色填充对象。本卡只处理「填充为专色」的图元，以及贴着专色的四色图元；' +
-          "渐变 / 图案 / 文字不处理。</span>";
+        // v12.8(雪糕): 空态与其余七卡统一成"一句话" —— 原先这里拖着两行适用范围
+        //   （本卡只处理「填充为专色」的图元…），在 300px 面板里独占两行，是整页唯一
+        //   一个空态不极简的卡。适用范围不是"每次扫完都要读"的信息 ⇒ 挪到整卡悬停提示。
+        //   ⚠ 文案里的括注用半角（main.js 正文禁全角括号, bt v9.9 守着）。
+        tHtml = '<span class="dim">没有专色填充对象。</span>';
+        tTip = "只处理「填充为专色」的图元，以及贴着专色的四色图元；渐变 / 图案 / 文字不处理。";
       }
 
       // v11.89(雪糕): 删掉卡片末尾那三行"规则 / 两条 ⚠"脚注。
@@ -2554,7 +2592,7 @@
       tChip = "未检查";
       tLevel = "warn";
     }
-    return scanCk[8] ? card("专色描边", tLevel, tChip, tHtml) : "";
+    return scanCk[8] ? card("专色描边", tLevel, tChip, tHtml, null, null, null, tTip) : "";
   }
 
   // ===== v11.90: 卡⑩「对照」=====
@@ -2645,6 +2683,12 @@
   // ---------- 执行 JSX 操作并刷新 ----------
   // v5.6/F7: 执行期间禁用按钮+显示 loading,防连点排队重复执行
   var actionBusy = false;
+  // v12.6: 动作轮次号 —— 与 run() 的 scanSeq 同一套路。
+  //   为什么需要: actBegin 的 20s 超时会**故意**放开 actionBusy(v10.43, 大 PDF 不干等),
+  //   用户接着点第二个动作后, 第一个动作的迟到回调仍会调 actEnd 把第二个的锁清掉,
+  //   表现为"第二个动作还没完, 按钮就亮了 / loading 先灭了"。
+  //   有了轮次号, 回调先认领"我还是不是当前这一轮", 不是就只收自己的计时器。
+  var actionSeq = 0;
 
   // v11.1(审查 ⑥): 动作执行的三段公共流程提到这里 —— 原先 execAction 与
   //   execActionMulti 各自抄了一遍"上锁 + 禁按钮 + 挂超时兜底"和"解锁 + 复按钮 + 收尾提示",
@@ -2708,8 +2752,12 @@
     //   .btn-action 之外还有可点目标(设置齿轮、遮罩里的按钮), 撞上时原实现纯粹无声,
     //   用户只会觉得"点了没反应、面板卡了"。与 run() 的"正在检查中"同一口径。
     if (actionBusy) { showNotice("上一个操作还在执行，请稍候再试。"); return; }
+    var mySeq = ++actionSeq;   // v12.6: 本轮号(与 scanSeq 同法)
     var actTimer = actBegin();
     execJsx(jsxFns, function (data, raw) {
+      // v12.6: 超时放开锁后用户已点了新动作 ⇒ 本轮作废。只收自己的计时器,
+      //   别去动新一轮的 actionBusy / 按钮 / 结果(与 run() 里的 mySeq 同一判法)。
+      if (mySeq !== actionSeq) { clearTimeout(actTimer); return; }
       actEnd(actTimer);
       var ok = !!(data && data.ok);
       // v8.8: 失败路径要保留错误提示(见 actFinish)
@@ -2728,9 +2776,14 @@
   function execActionMulti(calls, successMsg) {
     if (actionBusy) { showNotice("上一个操作还在执行，请稍候再试。"); return; }   // v11.39
     if (!calls || !calls.length) return;
+    var mySeq = ++actionSeq;   // v12.6: 整串共用一个轮次号
     var actTimer = actBegin();
     var msgs = [], idx = 0, failed = null, raw0 = "";
     function step() {
+      // v12.6: 已被新一轮接管 ⇒ 立刻停(不再发下一个 call, 也不 actEnd)。
+      //   已发出的 jsx 照跑完, 但后续步骤不再执行 —— 否则两串操作会交错,
+      //   而且旧串的 actEnd 会把新一轮的锁清掉。
+      if (mySeq !== actionSeq) { clearTimeout(actTimer); return; }
       if (idx >= calls.length) {
         actEnd(actTimer);
         var multiFailed = !!failed;
@@ -3013,10 +3066,10 @@
   //     (pfRichBlackChk)算"改了 N 处", 避免"报 5 改 3"。
   function onRbToK100() {
     var uT = $("chkRbUnlock") ? $("chkRbUnlock").checked : CHK_RB_UNLOCK;
-    customConfirm("将把四色黑(C/M/Y/K 每通道 >=80% 且累计 >=320%)转为单黑:\n" +
+    customConfirm("将把四色黑(C+M+Y+K 之和 >= " + thv("rbSum") + "%)转为单黑:\n" +
       "· 填充/描边改为 C0 M0 Y0 K100\n" +
       "· 只改颜色，叠印状态不动(要加/清叠印请用上面的叠印卡)\n" +
-      "· 文字只改填充色(不碰字符描边)；专色、RGB、渐变、图案一律不动\n" +
+      "· 文字填充与文字描边都算；专色、RGB、渐变、图案一律不动\n" +
       (uT ? "· 执行前先解锁全部图层与锁定对象\n"
         : "· 隐藏/锁定对象跳过；勾「解锁全部」可一并处理\n") +
       "此操作会直接修改文档，确定继续?", function () {
