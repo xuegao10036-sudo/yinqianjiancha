@@ -2,11 +2,11 @@
 (function () {
   "use strict";
 
-  var JS_BUILD = "20261126-1";
+  var JS_BUILD = "20261126-2";
   // 必须与 jsx/preflight.jsx 里的 PF_BUILD 保持一致。
   // JSX 每次返回都会带上它的构建号,前端据此判断 ExtendScript 引擎里
   // 加载的是不是当前版本 —— 不一致就强制 $.evalFile 重载(见 execJsx)。
-  var JSX_BUILD = "12.16";
+  var JSX_BUILD = "12.17";
   // v10.2 收尾: 「耗时较长」提示阈值 —— 原先 20000 在 run() 与 execAction() 各写一遍,
   //   连提示语里的「20 秒」也是手写 ⇒ 改口径要动 3 处、漏一处就文案与行为不一致。收成一处。
   var BUSY_TIMEOUT_MS = 20000;
@@ -2225,6 +2225,9 @@
     var ovpLocked = ovp.locked || 0;
     // v10.14: 四分类计数(旧 jsx 无 k100/spot/color 键 ⇒ ||0, 否则 NaN 恒假导致静默不显示)
     var ovpK100 = ovp.k100 || 0, ovpSpot = ovp.spot || 0, ovpColor = ovp.color || 0;
+    // v12.17(雪糕): 还没加叠印的单黑(K100) —— 与「单黑叠印」(已经加了)是两回事。
+    //   旧 jsx 没有这个字段 ⇒ 兜成 0, 面板行为与之前完全一致(不会凭空冒出按钮)。
+    var ovpK100Todo = ovp.k100Todo || 0;
     // v10.35: 叠印扫描是否被配额截断 —— 截断且 count=0 时**不能**说"无叠印"
     //   (漏检报通过是印刷上最危险的假阳性)。旧 jsx 无此键 ⇒ undefined, 走 !=== true 判否。
     // v10.36(审查 v10.35): 截断且 count>0 的两分支也要处理 —— v10.35 只补了 count=0 分支,
@@ -2294,9 +2297,13 @@
       return '<div' + (tip ? ' title="' + tip + '"' : "") + '><b class="' + c + '">' + n + '</b> 个' + label + "</div>";
     };
     var tHtml = "", tLevel = "ok", tChip = "无叠印";
+    // v12.17(雪糕): 「还没加叠印的单黑」也算要处理 —— 否则文档里一处叠印都没有时, 分级版
+    //   连「单黑加叠印」这个勾选项都不出现, 这条规则等于无处下手。
+    var tHasClear = (ovpWCls > 0 || ovpColor > 0);
+    var tHasAddK100 = (ovpK100Todo > 0);
     if (ovpN > 0) {
       var tNeedN = ovpWCls + ovpColor, tNormN = ovpK100 + ovpSpot;
-      tLevel = (ovpWCls > 0 || ovpColor > 0) ? "bad" : "ok";
+      tLevel = tHasClear ? "bad" : (tHasAddK100 ? "warn" : "ok");
       // v10.36: 截断时两个计数都只是下限 ⇒ 各加 "+"(与简洁版同口径)
       tChip = "需处理 " + tNeedN + (ovpTrunc ? "+" : "") + " · 正常 " + tNormN + (ovpTrunc ? "+" : "");
       tHtml += '<div class="ovp-cls">' +
@@ -2317,12 +2324,8 @@
           "</b> 处，未扫完的部分需人工复核。</div>";
       }
       if (ovpWCls > 0 || ovpColor > 0) {
-        // 动作区 id 加 t 前缀: 与简洁版的 chkOvpUnlock/btnOvpClear 区分(两版同时渲染进 DOM)
-        tHtml += '<div class="action-row"><div class="chk-row">' +
-          '<label class="chk" title="清除需处理叠印(近白/纯白 + 彩色 CMYK/RGB)对象的填充与描边叠印"><input type="checkbox" id="tChkClearWhite"> 清除需处理叠印</label>' +
-          '<label class="chk" title="为单黑(C0M0Y0K100)对象的填充与描边新增叠印"><input type="checkbox" id="tChkAddK100"> 单黑加叠印</label>' +
-          '<label class="chk" title="执行前先解锁全部图层、对象级锁定(Ctrl+2)与锁定组；隐藏对象一律不碰"><input type="checkbox" id="tChkOvpUnlock"> 解锁全部</label>' +
-          '</div><button class="btn-action" id="tBtnOvpApply">执行勾选项</button></div>';
+        // v12.17: 动作区已挪到 if/else 之外(见下方 tHasClear/tHasAddK100 那段) ——
+        //   因为「只有待加单黑、一处叠印都没有」时也要出按钮, 不能再挂在这个分支里。
       }
     } else if (ovpTrunc) {
       // v10.35: 与简洁版同口径 —— 截断且未命中时不报"无", 报"未完成"
@@ -2331,6 +2334,27 @@
         '<br><span class="dim">文档对象数超过本次检查配额，可能有叠印未被检查到。</span>';
     } else {
       tHtml = '无叠印。';
+    }
+    // v12.17(雪糕): 「待加单黑的账」与动作区统一放在 if/else 之外 ——
+    //   只要有得做(该清的叠印 / 该加的单黑)就出按钮, 两样都清零后按钮自动消失。
+    if (tHasAddK100) {
+      // 一处叠印都没有、只有待加单黑时: 卡头也换成它, 否则"需处理 0 · 正常 0"读不出重点。
+      if (ovpN === 0 && !ovpTrunc) { tLevel = "warn"; tChip = "待加单黑 " + ovpK100Todo + " 处"; }
+      tHtml += '<div class="dim">未加叠印的单黑 <b class="warn-t">' + ovpK100Todo +
+        "</b> 处，勾选「单黑加叠印」可一并加上。</div>";
+    }
+    if (tHasClear || tHasAddK100) {
+      // 动作区 id 加 t 前缀: 与简洁版的 chkOvpUnlock/btnOvpClear 区分(两版同时渲染进 DOM)
+      // 没有对应的活就不渲染那一颗勾选 —— 免得摆一个勾了也没用的框。
+      tHtml += '<div class="action-row"><div class="chk-row">' +
+        (tHasClear
+          ? '<label class="chk" title="清除需处理叠印(近白/纯白 + 彩色 CMYK/RGB)对象的填充与描边叠印"><input type="checkbox" id="tChkClearWhite"> 清除需处理叠印</label>'
+          : "") +
+        (tHasAddK100
+          ? '<label class="chk" title="为单黑(C0M0Y0K100)对象的填充与描边新增叠印"><input type="checkbox" id="tChkAddK100"> 单黑加叠印</label>'
+          : "") +
+        '<label class="chk" title="执行前先解锁全部图层、对象级锁定(Ctrl+2)与锁定组；隐藏对象一律不碰"><input type="checkbox" id="tChkOvpUnlock"> 解锁全部</label>' +
+        '</div><button class="btn-action" id="tBtnOvpApply">执行勾选项</button></div>';
     }
     // v11.101: 与简洁版同步 —— 这句「隐藏对象与图层不参与叠印检查。」删掉(确认框里已有)。
 

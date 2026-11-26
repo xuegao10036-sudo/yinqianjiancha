@@ -71,7 +71,7 @@ function pfStringify(value) {
 // v10.60: 颜色收集深度上限 20->64 与主扫描统一; pfThCopy 补 htCap;
 //   __pfUsedCache 两处失效点(进 pfClearUnusedSwatches 即清 + pfClearUnusedGradPattern 读完即清)
 // v11.2: 全站胶囊按钮统一 40px 高(纯面板 CSS 改动, ExtendScript 逻辑零变化), 仅同步版本号
-var PF_BUILD = "12.16";
+var PF_BUILD = "12.17";
 
 // v10.46: 颜色收集的**轮内**复用缓存。
 //   onClearSwatches 用 execActionMulti 串联 pfClearUnusedSwatches + pfClearUnusedGradPattern,
@@ -1073,7 +1073,7 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11) {
       //   配额截断 ⇒ count 停在 0、前端显示"无叠印"+绿徽标 —— **漏检却报通过**, 印刷上最危险。
       //   三处 underQuota 失败须同步把本字段置真(见下方 path/compound/text 分支)。
       // v11.56: whiteClass —— 分级版口径的"白"(CMYK 原值和 < 1), 与精确 0 的 white 分开记。
-      overprint: { count: 0, white: 0, whiteClass: 0, k100: 0, spot: 0, color: 0, text: 0, path: 0, locked: 0, samples: [], truncated: false }
+      overprint: { count: 0, white: 0, whiteClass: 0, k100: 0, k100Todo: 0, spot: 0, color: 0, text: 0, path: 0, locked: 0, samples: [], truncated: false }
     };
 
     // 按阈值归类,并记录样本(v5.6/B2: 文字/路径各自独立)
@@ -1202,16 +1202,26 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11) {
       //   读不到 / 抛异常由 pfOvp* 兜成 false(宁可不报,绝不误报);色值只在命中时才读,摊薄成本。
       // v8.6: 复用上面已读出的 fc / sc, 不再回读 pi.fillColor / pi.strokeColor
       if (CK.ov) { // v10.0: 卡⑦关 ⇒ 不读叠印布尔
+        // v12.17(雪糕): **没加叠印的单黑(K100)也要能被数出来** —— 否则文档里一处叠印都没有时,
+        //   分级版连「单黑加叠印」这个勾选项都不出现, 等于这条规则无处下手。
+        //   口径: 该图元**不是叠印** + 它这一侧的墨是单黑 ⇒ 记一条待加(填充/描边各算一处,
+        //   与 count 同口径)。已有叠印的单黑仍走上面那支, 计入 k100(正常)。
         try {
           if (pfOvpFill(pi)) {
             if (!fc) { try { fc = pi.fillColor; } catch (e1b) {} } // v10.11: ⑥关时命中才补读
             pfOvpAdd("path", "填充", fc, nm, ownRef);
+          } else if (fld) {
+            if (!fc) { try { fc = pi.fillColor; } catch (e1c) {} }
+            if (fc && pfIsK100Raw(fc)) black.overprint.k100Todo++;
           }
         } catch (e8) {}
         try {
           if (pfOvpStroke(pi)) {
             if (!sc) { try { sc = pi.strokeColor; } catch (e2b) {} } // v10.11: 原 scO 补读改为统一兜底
             pfOvpAdd("path", "描边", sc, nm, ownRef);
+          } else if (stk) {
+            if (!sc) { try { sc = pi.strokeColor; } catch (e2c) {} }
+            if (sc && pfIsK100Raw(sc)) black.overprint.k100Todo++;
           }
         } catch (e9) {}
       }
@@ -1625,12 +1635,24 @@ function runPreflight(c1, c2, c3, c4, c5, c6, c7, c8, c9, c10, c11) {
           if (!CK.ik && ca) { try { fcTx = ca.fillColor; } catch (eFc2) { fcTx = null; } }
           try {
             var ovf = pfCharOvpFill(ca), ovs = pfCharOvpStroke(ca);
-            if (ovf || ovs) {
-              if (ovf) pfOvpAdd("text", "填充", fcTx, getSnip(), it);
-              if (ovs) {
-                // v8.6: 描边色只在真的命中叠印描边时才读(多数帧不描边, 这一读可省)
-                var scTx = null; try { scTx = ca.strokeColor; } catch (eSc) {}
-                pfOvpAdd("text", "描边", scTx, getSnip(), it);
+            // v12.17(雪糕): 同图形侧 —— 没加叠印的单黑也要数出来(文字填充/描边各算一处)。
+            //   ⚠ 填充与描边本来就是**各判各的**(一支叠印不影响另一支), 所以这里是两个独立的
+            //     if/else, 不能合并成 `if (ovf || ovs) {...} else {...}`。
+            if (ovf) {
+              pfOvpAdd("text", "填充", fcTx, getSnip(), it);
+            } else if (fcTx && pfIsK100Raw(fcTx)) {
+              black.overprint.k100Todo++;
+            }
+            if (ovs) {
+              // v8.6: 描边色只在真的命中叠印描边时才读(多数帧不描边, 这一读可省)
+              var scTx = null; try { scTx = ca.strokeColor; } catch (eSc) {}
+              pfOvpAdd("text", "描边", scTx, getSnip(), it);
+            } else if (ca) {
+              // 没开叠印描边 —— 先看这条描边是否真的存在(宽度>0), 再看它是不是单黑
+              var swTx = 0; try { swTx = ca.strokeWeight; } catch (eSwT) { swTx = 0; }
+              if (swTx > 0) {
+                var scTx2 = null; try { scTx2 = ca.strokeColor; } catch (eSc2) { scTx2 = null; }
+                if (scTx2 && pfIsK100Raw(scTx2)) black.overprint.k100Todo++;
               }
             }
           } catch (eOvp) {}
