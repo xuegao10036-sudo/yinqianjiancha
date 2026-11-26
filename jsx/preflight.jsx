@@ -71,7 +71,7 @@ function pfStringify(value) {
 // v10.60: 颜色收集深度上限 20->64 与主扫描统一; pfThCopy 补 htCap;
 //   __pfUsedCache 两处失效点(进 pfClearUnusedSwatches 即清 + pfClearUnusedGradPattern 读完即清)
 // v11.2: 全站胶囊按钮统一 40px 高(纯面板 CSS 改动, ExtendScript 逻辑零变化), 仅同步版本号
-var PF_BUILD = "12.17";
+var PF_BUILD = "12.18";
 
 // v10.46: 颜色收集的**轮内**复用缓存。
 //   onClearSwatches 用 execActionMulti 串联 pfClearUnusedSwatches + pfClearUnusedGradPattern,
@@ -3976,8 +3976,14 @@ function pfSpotScan(doc) {
     if (ss === 1) st.spotDone++;   // 已有同族描边 ⇒ 计入「已加」, 但不改粗细
   }
   for (i = 0; i < cmyks.length; i++) {
-    if (!pfNearPeer(cmyks[i], spots, PF_TRAP_TOL, cmyks[i].it, col.items)) continue;   // 四色的相邻源只认专色
     fc = cmyks[i].fc;      // v12.13: 同上, 复合路径读不到自身 fillColor
+    // v12.18(雪糕): 单黑(K100)不算「相邻四色」—— 它既不需要同色描边, 也不需要描边叠印
+    //   (黑版本来就该压印; 给条码条/黑字加一圈 0.2mm 同色描边只会把它们糊粗糊死)。
+    //   ⚠ 只是**不统计 / 不选中 / 不执行**这三件事, 千万**别**把单黑从 cmyks/peers 池里
+    //     摘掉, 也别在 pfFillKind 里把它改判成 white/other —— 贴着单黑的专色照旧要陷印,
+    //     它仍然是一个真实的邻居(改判成白会让那个专色误走「只贴白不处理」)。
+    if (fc && pfIsK100Raw(fc)) continue;
+    if (!pfNearPeer(cmyks[i], spots, PF_TRAP_TOL, cmyks[i].it, col.items)) continue;   // 四色的相邻源只认专色
     ss = fc ? pfStrokeState(cmyks[i].it, fc) : 0;
     if (ss === 2) { st.strokeKept++; continue; }     // 同上: 别的颜色的描边不动
     st.cmykAdj++;
@@ -4026,8 +4032,10 @@ function pfSpotSelectAll() {
       if (pick(spots[i])) nSpot++;
     }
     for (i = 0; i < cmyks.length; i++) {
-      if (!pfNearPeer(cmyks[i], spots, PF_TRAP_TOL, cmyks[i].it, col.items)) continue;
       try { fcP = cmyks[i].fc; } catch (eFc2) { fcP = null; }   // v12.13: 同上
+      // v12.18: 单黑(K100)不选 —— 口径同 pfSpotScan, 否则「选中 N 个」与「处理 N 个」对不上账
+      if (fcP && pfIsK100Raw(fcP)) continue;
+      if (!pfNearPeer(cmyks[i], spots, PF_TRAP_TOL, cmyks[i].it, col.items)) continue;
       ssP = fcP ? pfStrokeState(cmyks[i].it, fcP) : 0;
       if (ssP === 2) { nKept++; continue; }
       if (pick(cmyks[i])) nCmyk++;
@@ -4100,6 +4108,9 @@ function pfTrapStrokeApply(pi, wPt, fc, k) {
     if (k === "white") { out.r = "white"; } else if (k === "other") { out.r = "other"; }
     return out;
   }
+  // v12.18: 兜底 —— 单黑(K100)一条描边都不加。正常入口(pfSpotTrap)已提前拦截, 这里再挡一次,
+  //   免得将来新增调用点时漏掉、又把条码/黑字糊粗。r="k100" 调用方不做任何计数即静默。
+  if (k === "cmyk" && pfIsK100Raw(fc)) { out.r = "k100"; out.k = "cmyk"; return out; }
   out.k = k;
   var stt = pfStrokeState(pi, fc);
   if (stt >= 1) { out.r = "kept"; return out; }   // 已有描边 ⇒ 原样保留, 一个属性都不碰
@@ -4217,6 +4228,10 @@ function pfSpotTrap(strokeMM) {
         // 专色: 与四色或另一个专色相邻才加; 只贴白/空白 ⇒ 跳过
         if (!pfNearPeer(box, peers, PF_TRAP_TOL, pi, col.items)) { spotIdle++; return; }
       } else {
+        // v12.18: 单黑(K100)一律不加描边叠印 —— 口径同 pfSpotScan / pfSpotSelectAll。
+        //   故意**不**计进 cmykFar: 它本来就不该处理, 报成「不贴专色的四色 N 个未处理」
+        //   会让人以为漏了一批, 所以静默跳过。
+        if (pfIsK100Raw(fc)) return;
         // 四色: 只认专色做相邻源; 贴四色/白色 ⇒ 跳过
         if (!pfNearPeer(box, spots, PF_TRAP_TOL, pi, col.items)) { cmykFar++; return; }
       }
