@@ -71,7 +71,7 @@ function pfStringify(value) {
 // v10.60: 颜色收集深度上限 20->64 与主扫描统一; pfThCopy 补 htCap;
 //   __pfUsedCache 两处失效点(进 pfClearUnusedSwatches 即清 + pfClearUnusedGradPattern 读完即清)
 // v11.2: 全站胶囊按钮统一 40px 高(纯面板 CSS 改动, ExtendScript 逻辑零变化), 仅同步版本号
-var PF_BUILD = "12.15";
+var PF_BUILD = "12.16";
 
 // v10.46: 颜色收集的**轮内**复用缓存。
 //   onClearSwatches 用 execActionMulti 串联 pfClearUnusedSwatches + pfClearUnusedGradPattern,
@@ -3817,7 +3817,19 @@ function pfBoxCovers(o, ov, tol) {
 //   occluders 就是 pfTrapCollect 的 items, z 即下标 ⇒ 夹在中间的那段是**连续切片**,
 //   只需遍历 items[lo+1 .. hi-1], 不必全池扫。
 var PF_OCC_MAX = 4000;        // 池子超过这个数 ⇒ 放弃遮挡判定
-var PF_OCC_SPAN_MAX = 400;    // 两个图元之间夹了超过这么多条 ⇒ 放弃(跨度过大, 判定不可信)
+// v12.16(雪糕 2026-11-26 的「条码.ai」实测): 400 -> **2000**。
+//   症状: 白块托着的黑条码, 3 条里 2 条被加了描边, 剩下 1 条正常; 同一份稿子同一批条码
+//     有的加有的不加 —— 这种"部分中招"就是本闸在起作用, 不是颜色判错。
+//   实测数据(1805 条图元的真稿, 用 _diag/replay.js 离线重放 pfSpotScan):
+//     跨度上限 400  ⇒ 相邻四色 937 条，其中 K100 条码条 **87 条被误判**
+//     跨度上限 800+ ⇒ 相邻四色 532 条，K100 条码条 **0 条被误判**（全部由白块隔开）
+//   为什么条码必踩: 一根条就是一个图元, 一条码几十上百根, 而跨度 = 这根条与专色底之间
+//     **夹了多少个收集到的图元**(不是物理距离) ⇒ 后画的条很容易跨过 400。
+//   ⇒ 400 对「几百根条拼成的对象」根本不成立, 放宽到 2000 后该稿所有跨度都落在范围内。
+//   ⚠ 代价: 每一对近邻要扫的切片变长。实测 1805 条的稿从 142ms 涨到 181ms(Node),
+//     真机 ExtendScript 约慢 5~10 倍但同样是毫秒级到秒级; 若将来遇到超大稿变卡,
+//     先降 PF_OCC_MAX(整池上限), 别把这里改回 400 —— 那会让条码类对象重新被误判。
+var PF_OCC_SPAN_MAX = 2000;
 
 // A、B 之间是否夹着**另一种墨**把二者隔开
 //   a、b、occluders 都必须是 pfTrapCollect 的 entry(带 z / nx0..ny1 / fc)
